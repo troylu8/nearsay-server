@@ -21,7 +21,7 @@ function flipLastV(q: Quadrant) { return q ^ 0b01; } // swap the last bit
 function endsOnRight(q: Quadrant) { return (q >> 1) == 1; } // second last bit is 1
 function endsOnBottom(q: Quadrant) { return (q & 1) == 0; } // last bit is 0
 
-/** starting from the 2nd last bit, every other bit is 1: `_1_1_1_` */
+/** starting from the 2nd last bit, every other bit is 1: `1_1_1_` */
 function allRight(geohash: Geohash) {
     let cursor = 0b10;
 
@@ -32,7 +32,7 @@ function allRight(geohash: Geohash) {
 
     return true;
 }
-function allBottom(geohash: number) { // if last bit is 0, every other bit is 0: 010101010
+function allBottom(geohash: number) { // if last bit is 0, every other bit is 0:  _0_0_0
     while (geohash != 0) {
         if ((geohash & 1) == 1) return false;
         geohash = geohash >> 2;
@@ -40,25 +40,29 @@ function allBottom(geohash: number) { // if last bit is 0, every other bit is 0:
     return true;
 }
 
-// function getAdjRight(geohash: Geohash): Geohash {
+function getAdjRight(geohash: Geohash): Geohash {
 
-//     if (!endsOnRight(geohash)) return flipLastH(geohash);
+    if (!endsOnRight(geohash[0])) {
+        geohash[0] = flipLastH(geohash[0]);
+        return geohash;
+    }
 
-//     if (allRight(geohash)) { // flip every x bit 
-//         let cursor = 0b10;
+    if (allRight(geohash)) { // flip every x bit 
+        let cursor = 0b10;
 
-//         while (cursor < geohash) {
-//             geohash = geohash ^ cursor;
-//             cursor << 2;
-//         }
+        while ((cursor & geohash[1]) != 0) {
+            geohash[0] = geohash[0] ^ cursor;
+            cursor << 2;
+        }
 
-//         return geohash;
-//     }
+        return geohash;
+    }
 
-//     return geohash ^ 0b1010; // flip last 2 bits
-// }
+    geohash[0] = geohash[0] ^ 0b1010; // flip last 2 bits
+    return geohash;
+}
 
-function geohashToStr(geohash: Geohash) {
+export function geohashToStr(geohash: Geohash) {
     let mask = geohash[1];
     let ones = 0;
     while (mask != 0) {
@@ -67,23 +71,17 @@ function geohashToStr(geohash: Geohash) {
     }
     return ((geohash[0] & geohash[1]) >>> 0).toString(2).padStart(ones, '0');
 }
-const geohash = drillWhile(0, 0, (geohash, bound) => {
-    console.log(geohashToStr(geohash));
-    console.log(bound);
-    return true;
-})[0];
-// console.log(getAdjRight(0b0_01_01).toString(2).padStart(10, '0'));
+console.log(geohashToStr(getAdjRight([0b0_10_01_01, 0b0_11_11_11])));
 
 export function getRooms(view: Bound): string[] {
     const size = Math.max(view.top - view.bottom, view.right - view.left);
     
-    const [geohash, top_left_tile] = drillWhile(view.top, view.left, (_, bound: Bound) => size > bound.top - bound.bottom);
+    const [geohash, top_left_tile] = drillWhile(view.top, view.left, (_, bound: Bound) => size < bound.top - bound.bottom);
     const bound_size = top_left_tile.right - top_left_tile.left;
 
     const tile_width = Math.ceil((view.right - top_left_tile.left) / bound_size);
     const tile_height = Math.ceil((top_left_tile.top - view.bottom) / bound_size);
     
-
     return [];
 }
 
