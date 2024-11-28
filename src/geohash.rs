@@ -15,6 +15,7 @@ pub struct Geohash {
 }
 
 impl Geohash {
+
     fn len(&self) -> u32 {
         let mut cursor = 1;
         while self.mask & cursor != 0 {
@@ -85,6 +86,12 @@ impl Geohash {
     
         else { self.bits =  self.bits ^ 0b0101; } // flip last 2 y bits
 
+    }
+
+    fn move_up(&mut self) {
+        if self.mask == 0 { return; }
+        self.bits = self.bits >> 2;
+        self.mask = self.mask >> 2;
     }
 }
 

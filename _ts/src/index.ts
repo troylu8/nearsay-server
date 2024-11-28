@@ -6,8 +6,8 @@ const io = new Server(5001, {cors: {origin: "*"}});
 io.on("connection", (client: Socket) => {
     console.log("connection");
 
-    client.on("move", (prev_view: Bound, curr_snapped: Bound, timestamps: QuadTree ) => {
-        const newRooms = getRooms(curr_snapped);
+    client.on("move", (prev: Bound, curr: Bound, timestamps: QuadTree ) => {
+        const newRooms = getRooms(curr);
         for (const room of client.rooms) {
             if (!newRooms.includes(room)) client.leave(room);
         }
@@ -21,7 +21,7 @@ io.on("connection", (client: Socket) => {
     client.on("post", (post: any) => {
         
         drillWhile(post.loc[0], post.loc[1], (geohash: Geohash) => {
-            if (geohash[1] > 0b1111111111111) return true;
+            if ((geohash[1] & 0b100000000) != 0) return true;
             
             io.to(geohashToStr(geohash)).emit("new-post", post);
 
