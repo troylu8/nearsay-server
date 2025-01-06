@@ -9,8 +9,7 @@
 
 // return data
 
-use std::collections::HashSet;
-
+use mongodb::bson::{doc, Bson, Document};
 use serde::{Serialize, Deserialize};
 
 use num_cmp::NumCmp;
@@ -27,15 +26,41 @@ fn round_up(n: f64, size: f64) -> f64 {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Rect<T> { pub top: T, pub bottom: T, pub left: T, pub right: T }
 
-impl<T: Copy> Rect<T> {
+impl<T: Copy + std::fmt::Debug> Rect<T> {
+
     pub fn contains<NumType: NumCmp<T>>(&self, x: NumType, y: NumType) -> bool {
         x.num_ge(self.left) && x.num_le(self.right) && y.num_le(self.top) && y.num_ge(self.bottom)
+    }
+
+    pub fn envelops<NumType: NumCmp<T> + std::fmt::Debug>(&self, smaller: &Rect<NumType>) -> bool {
+        return  smaller.top.num_le(self.top) && 
+                smaller.bottom.num_ge(self.bottom) && 
+                smaller.left.num_ge(self.left) && 
+                smaller.right.num_le(self.right);
+    }
+}
+
+impl<T: Into<Bson> + Copy> Rect<T> {
+    pub fn as_geo_json(&self) -> Document {
+        doc! {
+            "$geometry": {
+                "type": "Polygon",
+                "coordinates": [[
+                    [self.left, self.bottom],
+                    [self.right, self.bottom],
+                    [self.right, self.top],
+                    [self.left, self.top],
+                    [self.left, self.bottom],
+                ]]
+            }
+        }
     }
 }
 
 
-// const BOUND: Rect = Rect {top: 90.0, bottom: -90.0, left: -180.0, right: 180.0 };
-pub const BOUND: Rect<f64> = Rect {top: 10.0, bottom: 0.0, left: 0.0, right: 10.0 };
+
+const BOUND: Rect<f64> = Rect {top: 90.0, bottom: -90.0, left: -180.0, right: 180.0 };
+// pub const BOUND: Rect<f64> = Rect {top: 10.0, bottom: 0.0, left: 0.0, right: 10.0 };
 
 #[derive(Debug)]
 pub struct TileRegion { pub depth: usize, pub tile_size: f64, pub tile_region: Rect<usize> }
@@ -72,12 +97,12 @@ fn to_tile_reg(snapped_view: &Rect<f64>) -> TileRegion {
 
 const SPLIT: &str = " : ";
 
-pub fn update_rooms(client_socket: &SocketRef, prev_snapped: &Option<Rect<f64>>, curr_snapped: &Rect<f64>)  {
+pub fn update_rooms(client_socket: &SocketRef, prev: &Option<Rect<f64>>, curr: &Rect<f64>)  {
 
-    let curr = to_tile_reg(curr_snapped);
+    let curr = to_tile_reg(curr);
 
     // leave rooms
-    if let Some(prev_snapped) = prev_snapped {
+    if let Some(prev_snapped) = prev {
 
         let (prev_depth, prev_tile_size) = get_depth_and_tile_size(&prev_snapped);
     

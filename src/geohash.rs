@@ -119,7 +119,7 @@ impl GeoIterator {
         GeoIterator {
             x, y,
             geohash: Geohash::default(),
-            bound: Rect::default()
+            bound: Rect {}
         }
     }
 }
