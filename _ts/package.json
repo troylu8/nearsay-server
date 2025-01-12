@@ -12,6 +12,7 @@
     "description": "",
     "dependencies": {
         "mongodb": "^6.10.0",
+        "nearsay-server": "file:",
         "socket.io": "^4.8.1",
         "socket.io-client": "^4.8.1"
     },

@@ -1,14 +1,11 @@
-use std::sync::Arc;
 
-use mongodb::{ 
-    bson::{bson, doc, Bson, Document},
-    Client,
-    Collection, Database
-};
+use axum::{extract::Path, routing::get};
+use db::NearsayDB;
+use mongodb::bson::Document;
 use futures::TryStreamExt;
-use poi::POI;
+use poi::{Post, POI};
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::json;
 use socketioxide::{
     extract::{AckSender, Data, SocketRef},
     SocketIo,
@@ -16,21 +13,20 @@ use socketioxide::{
 use tower_http::cors::CorsLayer;
 use tower::ServiceBuilder;
 
-use tiles::{update_rooms, Rect};
+use area::TileRegion;
 
-mod tiles;
+mod area;
 mod poi;
+mod db;
+
+#[macro_use]
+mod clone_into_closure;
+
 
 #[derive(Serialize, Deserialize, Debug)]
-struct TileRegion {
-    depth: usize,
-    area: Rect<f64>
-}
-
-#[derive(Serialize, Deserialize)]
 struct MoveRequest {
-    curr: TileRegion,
-    prev: Option<TileRegion>,
+    curr: [Option<TileRegion>; 2],
+    prev: [Option<TileRegion>; 2],
     timestamps: Document
 }
 
@@ -44,7 +40,7 @@ struct MoveResponse {
 }
 
 
-fn on_connect(client_socket: SocketRef, db: &Arc<Database>) {
+fn on_socket_connect(client_socket: SocketRef, db: NearsayDB) {
 
     client_socket.on(
         "test",
@@ -53,43 +49,43 @@ fn on_connect(client_socket: SocketRef, db: &Arc<Database>) {
         }
     );
     
-    let db_clone_move = Arc::clone(db);
     client_socket.on(
         "move",
         |client_socket: SocketRef, Data(MoveRequest {curr, prev, timestamps}), ack: AckSender| async move {
             // update_rooms(&client_socket, &prev_snapped, &curr_snapped);
             
-            let query = match prev {
-                Some(prev) => {
-                    if prev.area.envelops(&curr.area) {
-                        ack.send( &json!(null) ).unwrap();
-                        return;
+            let mut res = MoveResponse::default();
+
+            
+            for i in 0..curr.len() {
+                if let Some(curr_deep_rect) = &curr[i] {
+
+                    let exclude = match &prev[i] {
+                        Some(prev_deep_rect) => {
+                            if prev_deep_rect.area.envelops(&curr_deep_rect.area) {
+                                continue;
+                            }
+
+                            Some(&prev_deep_rect.area)
+                        },
+                        None => None
+                    };
+                    
+                    let mut cursor = db.search_pois(
+                        &curr_deep_rect.area, 
+                        exclude
+                    ).await;
+
+                    while let Some(poi) = cursor.try_next().await.unwrap() {
+                        let has_been_updated = match timestamps.get(poi._id.clone()) {
+                            Some(prev_timestamp) => poi.timestamp as i32 > prev_timestamp.as_i32().expect("timestamp values should always be i32"),
+                            None => true,
+                        };
+                        if has_been_updated {
+                            res.fresh.push(poi);
+                        }
                     }
 
-                    doc! {
-                        "$and": [
-                            {"pos": { "$geoWithin": curr.area.as_geo_json() }},
-                            {"pos": { "$not": { "$geoWithin": prev.area.as_geo_json() } }},
-                        ] 
-                    }
-                },
-                None => doc! {
-                    "pos": { "$geoWithin": curr.area.as_geo_json() }
-                }
-            };
-            
-            let mut res = MoveResponse::default();
-            
-            let mut cursor = db_clone_move.collection::<POI>("poi")
-                                .find(query).await.unwrap();
-        
-            while let Some(poi) = cursor.try_next().await.unwrap() {
-                let has_been_updated = match timestamps.get(poi._id.clone()) {
-                    Some(prev_timestamp) => poi.timestamp as i32 > prev_timestamp.as_i32().expect("timestamp values should always be i32"),
-                    None => true,
-                };
-                if has_been_updated {
-                    res.fresh.push(poi);
                 }
             }
 
@@ -104,40 +100,24 @@ fn on_connect(client_socket: SocketRef, db: &Arc<Database>) {
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
-    let db = Arc::new(
-        Client::with_uri_str("mongodb://localhost:27017").await?.database("nearsay")
-    );
+    let db = NearsayDB::new().await;
     
-
-    // for y in -90..=90 {
-    //     for x in -180..=180 {
-    //         db.collection("poi").insert_one(doc! {
-    //             "_id": format!("{x},{y}"),
-    //             "pos": [x, y],
-    //             "variant": "post",
-    //             "data": {
-    //                 "body": format!("lorem {x},{y}"),
-    //                 "likes": y,
-    //                 "dislikes": x,
-    //                 "expiry": y+x,
-    //                 "views": 10
-    //             },
-    //             "timestamp": 111
-    //         }).await?;
-    //     }
-    // }
-
-
     let (socketio_layer, io) = SocketIo::new_layer();
-
-    io.ns("/", move |client_socket| on_connect(client_socket, &db));
+    
+    io.ns("/", clone_into_closure! { (db) move |client_socket| on_socket_connect(client_socket, db) } );
 
     let app = axum::Router::new()
         .layer(
             ServiceBuilder::new()
                 .layer(CorsLayer::permissive()) 
-                .layer(socketio_layer),
-        );
+                .layer(socketio_layer)
+        )
+        .route("/posts/:id", get(
+            clone_into_closure! {
+                (db)
+                |Path(id): Path<String>| async move { db.get_poi_data::<Post>(id).await }
+            }
+        ));
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:5000").await?;
 
@@ -145,3 +125,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     Ok(())
 }
+
+ 
+// for y in -90..=90 {
+//     for x in -180..=180 {
+//         db.db.collection("poi").insert_one(doc! {
+//             "_id": format!("{x},{y}"),
+//             "pos": [x, y],
+//             "variant": "post",
+//             "data": {
+//                 "body": format!("lorem {x},{y}"),
+//                 "likes": (y as i32).abs(),
+//                 "dislikes": (x as i32).abs(),
+//                 "expiry": (y+x as i32).abs(),
+//                 "views": 10
+//             },
+//             "timestamp": 111
+//         }).await?;
+//     }
+// }
