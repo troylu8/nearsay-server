@@ -1,6 +1,6 @@
 use std::{fmt::Debug, time::SystemTime};
 use mongodb::{ 
-    bson::doc, options::Hint, results::InsertOneResult, Client, Cursor, Database
+    bson::doc, options::Hint, Client, Cursor, Database
 };
 use serde::de::DeserializeOwned;
 
@@ -17,12 +17,13 @@ impl NearsayDB {
         }
     }
 
-    pub async fn add_post(&self, pos: &[i32], body: String) -> Result<InsertOneResult, mongodb::error::Error> {
+    pub async fn add_post(&self, pos: &[f64], body: String) -> Result<(String, i64), mongodb::error::Error> {
         
+        let _id = gen_id();
         let millis: i64 = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_millis().try_into().expect("current time millis doesnt fit into i64");
         
-        self.db.collection("poi").insert_one(doc! {
-            "_id": gen_id(),
+        let res = self.db.collection("poi").insert_one(doc! {
+            "_id": _id.clone(),
             "variant": "post".to_string(),
             "timestamp": millis,
             "pos": pos,
@@ -31,7 +32,12 @@ impl NearsayDB {
             "dislikes": 0,
             "expiry": (today() + 7) as i64,
             "views": 0
-        }).await
+        }).await;
+
+        match res {
+            Ok(_) => Ok((_id, millis)),
+            Err(err) => Err(err)
+        }
     }
 
     pub async fn get_poi_data<T>(&self, id: String) -> Option<T>
@@ -77,7 +83,7 @@ fn gen_id() -> String {
     let mut res: [char; 10] = [' '; 10];
 
     for i in 0..10 {
-        res[i] = str.chars().nth(rand::thread_rng().gen_range(0..=64)).unwrap();
+        res[i] = str.chars().nth(rand::thread_rng().gen_range(0..64)).unwrap();
     }
 
     res.iter().collect()

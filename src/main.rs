@@ -4,7 +4,6 @@ use endpoints::get_endpoints_router;
 use socket::attach_socket_events;
 use socketioxide::SocketIo;
 use tower_http::cors::CorsLayer;
-use tower::ServiceBuilder;
 
 mod area;
 mod types;
@@ -26,13 +25,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     attach_socket_events(db.clone(), io.clone());
 
     let app = axum::Router::new()
-        .layer(
-            ServiceBuilder::new()
-                .layer(CorsLayer::permissive()) 
-                .layer(socketio_layer)
-        )
-        .nest("/", get_endpoints_router(db.clone(), io.clone()));
-        
+        .merge(get_endpoints_router(db.clone(), io.clone()))
+        .layer(socketio_layer)
+        .layer(CorsLayer::permissive());
+
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:5000").await?;
 

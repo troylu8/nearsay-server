@@ -1,5 +1,6 @@
+use std::collections::HashMap;
+
 use futures::TryStreamExt;
-use mongodb::bson::Document;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use socketioxide::{extract::{AckSender, Data, SocketRef}, SocketIo};
@@ -10,7 +11,7 @@ use crate::{area::TileRegion, clone_into_closure, db::NearsayDB, types::POI};
 struct MoveRequest {
     curr: [Option<TileRegion>; 2],
     prev: [Option<TileRegion>; 2],
-    timestamps: Document
+    timestamps: HashMap<String, u64>
 }
 
 #[derive(Serialize, Deserialize, Default, Debug)]
@@ -60,8 +61,8 @@ fn on_socket_connect(client_socket: SocketRef, db: NearsayDB) {
                     ).await;
 
                     while let Some(poi) = cursor.try_next().await.unwrap() {
-                        let has_been_updated = match timestamps.get(poi._id.clone()) {
-                            Some(prev_timestamp) => poi.timestamp as i32 > prev_timestamp.as_i32().expect("timestamp values should always be i32"),
+                        let has_been_updated = match timestamps.get(&poi._id.clone()) {
+                            Some(prev_timestamp) => poi.timestamp > *prev_timestamp,
                             None => true,
                         };
                         if has_been_updated {

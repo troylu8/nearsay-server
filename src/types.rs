@@ -6,14 +6,11 @@ pub struct POI {
     pub _id: String,
     pub pos: [f64; 2],
     pub variant: String,
-    pub timestamp: usize,
+    pub timestamp: u64,
 }
 
 pub trait AsDbProjection {
     fn as_db_projection() -> Document;
-}
-pub trait AsVariant {
-    fn as_variant() -> String;
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -36,10 +33,5 @@ impl AsDbProjection for Post {
             "expiry": 1,
             "views": 1
         }
-    }
-}
-impl AsVariant for Post {
-    fn as_variant() -> String {
-        String::from("post")
     }
 }
