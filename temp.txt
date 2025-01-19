@@ -1,3 +1,37 @@
+  
+// const BOUND: Rect<f64> = Rect {top: 90.0, bottom: -90.0, left: -180.0, right: 180.0 };
+// pub const BOUND: Rect<f64> = Rect {top: 10.0, bottom: 0.0, left: 0.0, right: 10.0 };
+
+   // fn to_tile_reg(snapped_view: &Rect<f64>) -> TileRegion {
+//     let (depth, tile_size) = get_depth_and_tile_size(&snapped_view);
+
+//     let bottom = ((snapped_view.bottom - BOUND.bottom) / tile_size).floor() as usize;
+//     let left = ((snapped_view.left - BOUND.left) / tile_size).floor() as usize;
+//     let top = ((snapped_view.top - BOUND.bottom) / tile_size - 1.0).ceil() as usize;
+//     let right = ((snapped_view.right - BOUND.left) / tile_size - 1.0).ceil() as usize;
+
+//     TileRegion {
+//         depth, 
+//         tile_size,
+//         tile_region: Rect { top, bottom, left, right }
+//     }
+// }
+
+// fn get_depth_and_tile_size(rect: &Rect<f64>) -> (usize, f64) {
+//     let mut depth = 0;
+//     let mut tile_size = BOUND.right - BOUND.left;
+
+//     let rect_size = (rect.right - rect.left).min(rect.top - rect.bottom);
+
+//     while rect_size < tile_size {
+//         tile_size /= 2.0;
+//         depth += 1;
+//     }
+
+//     (depth, tile_size)
+// } 
+
+   
    let timestamps = {
                 let mut map = HashMap::with_capacity(timestamps.len());
                 for (id, time) in timestamps {
