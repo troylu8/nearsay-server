@@ -13,7 +13,6 @@ use mongodb::bson::{doc, Bson, Document};
 use serde::{Serialize, Deserialize};
 
 use num_cmp::NumCmp;
-use socketioxide::extract::SocketRef;
 
 
 fn round_down(n: f64, size: f64) -> f64 {

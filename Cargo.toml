@@ -4,14 +4,17 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-axum = "0.7.9"
+axum = {version = "0.7.9", features = ["macros"]}
 futures = "0.3.31"
+job_scheduler = "1.2.1"
 mongodb = "3.1.1"
 num-cmp = "0.1.0"
+rand = "0.8.5"
 serde = "1.0.215"
 serde_json = "1.0.133"
 socketioxide = "0.15.1"
 tokio = {version = "1.41.1", features = ["rt-multi-thread"] }
+tokio-cron-scheduler = "0.13.0"
 tower = "0.5.2"
 tower-http = { version = "0.5.0", features = ["cors"] }
 typed-builder = "0.20.0"

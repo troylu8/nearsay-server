@@ -1,33 +1,14 @@
-use std::fmt::Debug;
-use axum::{body::Body, response::{IntoResponse, Response}};
+use std::{fmt::Debug, time::SystemTime};
 use mongodb::{ 
-    bson::doc, options::Hint, Client, Cursor, Database
+    bson::doc, options::Hint, results::InsertOneResult, Client, Cursor, Database
 };
-use serde::{de::DeserializeOwned, Serialize};
+use serde::de::DeserializeOwned;
 
-use crate::{area::Rect, poi::{WrappedItem, POI}};
-
-pub struct GetDataResult<T>(Option<T>);
-impl<T: Serialize> IntoResponse for GetDataResult<T> {
-    fn into_response(self) -> Response {
-        let status = match self.0 {
-            Some(_) => 200,
-            None => 404,
-        };
-
-        let body = Into::<Body>::into(serde_json::to_vec(&self.0).unwrap());
-
-        Response::builder()
-            .status(status)
-            .header("Content-Type", "application/json")
-            .body(body)
-            .unwrap()
-    }
-}
+use crate::{area::Rect, delete_old::today, types::{AsDbProjection, POI}};
 
 #[derive(Clone)]
 pub struct NearsayDB {
-    db: Database
+    pub db: Database
 }
 impl NearsayDB {
     pub async fn new() -> Self {
@@ -36,19 +17,31 @@ impl NearsayDB {
         }
     }
 
-    pub async fn get_poi_data<T>(&self, id: String) -> GetDataResult<T>
-    where 
-        T: Send + Sync + DeserializeOwned + Debug
-    {
-        let result = self.db.collection::<WrappedItem<T>>("poi")
-            .find_one(doc!{"_id": id})
-            .projection(doc! {"_id": 0, "data": 1})
-            .await.expect("error getting data of id");
+    pub async fn add_post(&self, pos: &[i32], body: String) -> Result<InsertOneResult, mongodb::error::Error> {
+        
+        let millis: i64 = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_millis().try_into().expect("current time millis doesnt fit into i64");
+        
+        self.db.collection("poi").insert_one(doc! {
+            "_id": gen_id(),
+            "variant": "post".to_string(),
+            "timestamp": millis,
+            "pos": pos,
+            "body": body,
+            "likes": 0,
+            "dislikes": 0,
+            "expiry": (today() + 7) as i64,
+            "views": 0
+        }).await
+    }
 
-        match result {
-            Some(document) => GetDataResult(Some(document.data)),
-            None => GetDataResult(None),
-        }
+    pub async fn get_poi_data<T>(&self, id: String) -> Option<T>
+    where 
+        T: Send + Sync + DeserializeOwned + Debug + AsDbProjection
+    {
+        self.db.collection::<T>("poi")
+            .find_one(doc!{"_id": id})
+            .projection(T::as_db_projection())
+            .await.expect("error getting data of id")
     }
 
     pub async fn search_pois(&self, within: &Rect<f64>, exclude: Option<&Rect<f64>>) -> Cursor<POI> {
@@ -70,7 +63,22 @@ impl NearsayDB {
         self.db.collection::<POI>("poi")
             .find(query)
             .projection(doc! { "data": 0 })
-            .hint( Hint::Name(String::from("pos")) )
+            .hint( Hint::Name(String::from("pos_2dsphere")) )
             .await.unwrap()
     }
+}
+
+use rand::Rng;
+
+fn gen_id() -> String {
+
+    let str = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-";
+
+    let mut res: [char; 10] = [' '; 10];
+
+    for i in 0..10 {
+        res[i] = str.chars().nth(rand::thread_rng().gen_range(0..=64)).unwrap();
+    }
+
+    res.iter().collect()
 }
