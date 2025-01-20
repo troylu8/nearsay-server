@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use socketioxide::SocketIo;
 
-use crate::{clone_into_closure, db::NearsayDB, types::Post};
+use crate::{area::emit_at_pos_with_data, clone_into_closure, db::NearsayDB, types::{Post, POI}};
 
 fn json_response<T: Serialize>(status: u16, serializable: T) -> Response<Body> {
     let body = Into::<Body>::into(serde_json::to_vec(&serializable).unwrap());
@@ -45,11 +45,14 @@ pub fn get_endpoints_router(db: NearsayDB, io: SocketIo) -> axum::Router {
                     
                     let res = db.add_post(&req.pos, req.body).await;
 
-                    println!("{:?}", res);
-
                     match res {
                         Ok((_id, timestamp)) => {
-                            // send socket event
+                            emit_at_pos_with_data(io, req.pos, "new-poi", & POI{ 
+                                _id: _id.clone(), 
+                                pos: req.pos, 
+                                variant: String::from("post"), 
+                                timestamp: timestamp as u64
+                            });
 
                             json_response(200, json!({"_id": _id, "timestamp": timestamp}))
                         },

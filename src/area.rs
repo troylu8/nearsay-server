@@ -2,15 +2,7 @@ use mongodb::bson::{doc, Bson, Document};
 use serde::{Serialize, Deserialize};
 
 use num_cmp::NumCmp;
-use socketioxide::extract::SocketRef;
-
-
-fn round_down(n: f64, size: f64) -> f64 {
-    (n / size).floor() * size
-}
-fn round_up(n: f64, size: f64) -> f64 {
-    (n / size).ceil() * size
-}
+use socketioxide::{extract::SocketRef, SocketIo};
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct TileRegion {
@@ -18,8 +10,10 @@ pub struct TileRegion {
     pub area: Rect<f64>
 }
 impl TileRegion {
-    pub fn get_tile_size(&self) -> usize {
-        (180 * 2) / 2_usize.pow(self.depth as u32)
+    const BOUND: usize = 180;
+
+    pub fn get_tile_size(&self) -> f64 {
+        (TileRegion::BOUND * 2) as f64 / 2.0_f64.powf(self.depth as f64) 
     }
 }
 
@@ -58,61 +52,66 @@ impl<T: Into<Bson> + Copy> Rect<T> {
     }
 }
 
+pub fn emit_at_pos(io: SocketIo, pos: [f64; 2], event: &str) {
+    emit_at_pos_with_data::<()>(io, pos, event, &());
+}
+pub fn emit_at_pos_with_data<T: Sized + Serialize>(io: SocketIo, pos: [f64; 2], event: &str, data: &T) {
+    let [x, y] = pos;
+
+    let mut area = Rect {
+        left: -(TileRegion::BOUND as f64), 
+        right: TileRegion::BOUND as f64, 
+        top: TileRegion::BOUND as f64, 
+        bottom: -(TileRegion::BOUND as f64)
+    };
+
+    io.to(get_room(0, area.left, area.bottom)).emit(event, data).unwrap();
+    
+    for depth in 1..=19 {
+        
+        let mid_x = (area.left + area.right) / 2.0;
+        let mid_y = (area.top + area.bottom) / 2.0;
+        
+        if x >= mid_x { area.left = mid_x; }
+        else { area.right = mid_x; }
+        
+        if y >= mid_y { area.bottom = mid_y; }
+        else { area.top = mid_y; }
+        
+        io.to(get_room(depth, area.left, area.bottom)).emit(event, data).unwrap();
+    }
+}
+
 
 const SPLIT: &str = " : ";
 
-// depth : x : y
+pub fn update_rooms(client_socket: &SocketRef, tilereg: &TileRegion)  {
 
-pub fn update_rooms(client_socket: &SocketRef, prev: &Option<TileRegion>, curr: &TileRegion)  {
+    client_socket.leave_all().unwrap();
 
-    // leave old rooms
-    if let Some(prev) = prev {
-        if prev.depth != curr.depth {
-            // leave all rooms
-            println!("leaving all old rooms", );
-            client_socket.leave_all().unwrap();
-        }
-        else {
-            for room in client_socket.rooms().unwrap() {
-                
-                let [x, y] = room.split(SPLIT)
-                                .map(|str| str.parse::<f64>().unwrap())
-                                .collect::<Vec<f64>>()[1..] 
-                                else { panic!("{room:?} should be depth:x:y format") };
-
-                
-                // if this tile is outside region, leave
-                if !curr.area.contains(x, y) {
-
-                    // leave this room
-                    println!("left {room:?}", );
-                    client_socket.leave(room).unwrap();
-                }
-            }
-        }
-    }
-
-    let tile_size = curr.get_tile_size();
-    let width = ((curr.area.right - curr.area.left) / tile_size as f64) as usize;
-    let height = ((curr.area.top - curr.area.bottom) / tile_size as f64) as usize;
-
-    // join curr rooms    
+    let tile_size = tilereg.get_tile_size();
+    let width = ((tilereg.area.right - tilereg.area.left) / tile_size).ceil() as usize;
+    let height = ((tilereg.area.top - tilereg.area.bottom) / tile_size).ceil() as usize;
+    
     for x in 0..width {
         for y in 0..height {
 
-            let room = format!("{}{}{}{}{}", 
-                curr.depth,
-                SPLIT,
-                curr.area.left + (x * tile_size) as f64,
-                SPLIT,
-                curr.area.bottom + (y * tile_size) as f64,
+            let room = get_room(
+                tilereg.depth, 
+                tilereg.area.left + (x as f64 * tile_size), 
+                tilereg.area.bottom + (y as f64 * tile_size)
             );
 
             // join this room 
-            println!("joined {}", &room);
             client_socket.join(room).unwrap();
         }
     }
-
 }
 
+fn get_room(depth: usize, left: f64, bottom: f64) -> String {
+    format!("{}{}{}{}{}", depth, SPLIT, to_5_decimals(left), SPLIT, to_5_decimals(bottom))
+}
+
+fn to_5_decimals(x: f64) -> f64 {
+    (x * 100000.0).round() / 100000.0
+}

@@ -27,17 +27,18 @@ fn on_socket_connect(client_socket: SocketRef, db: NearsayDB) {
     client_socket.on(
         "move",
         |client_socket: SocketRef, Data(MoveRequest {curr, prev, timestamps}), ack: AckSender| async move {
-            
-            let mut res = MoveResponse::default();
+            println!("", );
+            println!("got move req", );
+            let mut resp = MoveResponse::default();
             
             for i in 0..curr.len() {
                 if let Some(curr_region) = &curr[i] {
-                    update_rooms(&client_socket, &prev[i], curr_region);
-                    add_to_move_reponse(&db, &prev[i], curr_region, &timestamps, &mut res).await;
+                    update_rooms(&client_socket, curr_region);
+                    add_to_move_reponse(&db, &prev[i], curr_region, &timestamps, &mut resp).await;
                 }
             }
 
-            ack.send( &json!(res) ).unwrap();
+            ack.send( &json!(resp) ).unwrap();
 
         },
     );
