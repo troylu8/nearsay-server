@@ -27,8 +27,6 @@ fn on_socket_connect(client_socket: SocketRef, db: NearsayDB) {
     client_socket.on(
         "move",
         |client_socket: SocketRef, Data(MoveRequest {curr, prev, timestamps}), ack: AckSender| async move {
-            println!("", );
-            println!("got move req", );
             let mut resp = MoveResponse::default();
             
             for i in 0..curr.len() {

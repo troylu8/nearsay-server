@@ -35,3 +35,9 @@ impl AsDbProjection for Post {
         }
     }
 }
+
+pub struct User {
+    _id: String,
+    username: String,
+    hash: String,
+}
