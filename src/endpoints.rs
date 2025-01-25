@@ -1,10 +1,11 @@
 
-use axum::{body::Body, extract::{Path, Request}, http::{HeaderMap, Response, StatusCode}, routing::{get, post}, Json};
+use axum::{body::Body, extract::Path, http::{HeaderMap, StatusCode}, routing::{get, post}, Json, response::Response};
+use axum_extra::extract::CookieJar;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use socketioxide::SocketIo;
 
-use crate::{area::emit_at_pos_with_data, auth::authenticate, clone_into_closure, db::{NearsayDB, NewUserError}, types::{Post, POI}};
+use crate::{area::emit_at_pos_with_data, auth::{authenticate, get_auth_info, create_user, NearsayError}, clone_into_closure, db::NearsayDB, types::{Post, POI}};
 
 fn json_response<T: Serialize>(status: u16, serializable: T) -> Response<Body> {
     let body = Into::<Body>::into(serde_json::to_vec(&serializable).unwrap());
@@ -17,7 +18,7 @@ fn json_response<T: Serialize>(status: u16, serializable: T) -> Response<Body> {
 }
 
 #[derive(Deserialize, Debug)]
-struct NewUserRequest {
+struct UserInfo {
     username: String,
     userhash: String
 }
@@ -28,38 +29,31 @@ struct NewPostRequest {
     body: String
 }
 
+
 pub fn get_endpoints_router(db: NearsayDB, io: SocketIo) -> axum::Router {
     axum::Router::new()
         .route("/sign-up", post(
             clone_into_closure! {
                 (db)
-                |Json(req): Json<NewUserRequest>| async move {
-                    match db.add_new_user(req.username, req.userhash).await {
-                        Ok((jwt_token, csrf_token)) => {
-                            Response::builder()
-                                .status(200)
-                                .header("CSRF-TOKEN", csrf_token)
-                                .body(jwt_token)
-                                .unwrap()
-                        },
-                        Err(err) => {
-                            let status = match err {
-                                NewUserError::ServerError => StatusCode::INTERNAL_SERVER_ERROR,
-                                NewUserError::UsernameTaken => StatusCode::CONFLICT,
-                            };
-
-                            Response::builder().status(status).body(String::new()).unwrap()
-                        },
-                    }
+                |Json(req): Json<UserInfo>| async move {
+                    create_user(&db, req.username, req.userhash).await
                 }
             }
         ))
-        .route("/posts/{id}/vote", post(
+        .route("/sign-in", post(
+            clone_into_closure!{
+                (db)
+                |Json(req): Json<UserInfo>| async move {
+                    get_auth_info(&db, req.username, req.userhash).await
+                }
+            }
+        ))
+        .route("/vote/{id}", post(
             clone_into_closure! {
                 (db)
-                |headers: HeaderMap, vote_type: String| async move {
+                |headers: HeaderMap, cookies: CookieJar, vote_type: String| async move {
 
-                    if let Ok(uid) = authenticate(&headers) {
+                    if let Ok(uid) = authenticate(&headers, &cookies) {
                         println!("voted {} as {} ", vote_type, uid);
 
                         StatusCode::OK

@@ -36,8 +36,9 @@ impl AsDbProjection for Post {
     }
 }
 
+#[derive(Deserialize)]
 pub struct User {
-    _id: String,
-    username: String,
-    hash: String,
+    pub _id: String,
+    pub username: String,
+    pub hash: String,
 }

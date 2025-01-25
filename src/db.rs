@@ -1,20 +1,14 @@
 
 use std::{fmt::Debug, time::SystemTime};
-use bcrypt::{hash, BcryptError, DEFAULT_COST};
-use jwt::Error as JwtError;
+use bcrypt::{hash, DEFAULT_COST};
 use mongodb::{ 
     bson::doc, options::Hint, Client, Cursor, Database, error::Error as MongoError
 };
 use serde::de::DeserializeOwned;
 
-use crate::{area::Rect, auth::create_jwt_and_csrf_token, delete_old::today, types::{AsDbProjection, User, POI}};
+use crate::{area::Rect, auth::NearsayError, delete_old::today, types::{AsDbProjection, User, POI}};
 
 
-
-pub enum NewUserError {
-    ServerError,
-    UsernameTaken,
-}
 
 #[derive(Clone)]
 pub struct NearsayDB {
@@ -27,48 +21,52 @@ impl NearsayDB {
         }
     }
 
-    /// if successful, returns `( jwt token, csrf token )`
-    pub async fn add_new_user(&self, username: String, userhash: String) -> Result<(String, String), NewUserError> {
+    pub async fn get_user(&self, username: String) -> Result<Option<User>, MongoError> {
+        let get_user_req = self.db.collection::<User>("users").find_one(doc! {"username": username}).await;
+
+        if let Err(mongo_err) = &get_user_req {
+            eprintln!("mongodb error when getting user: {}", &mongo_err);
+        }
+
+        get_user_req
+    }
+
+    pub async fn insert_user(&self, user: User) -> Result<(), NearsayError> {
 
         // check if username is taken
         let count_result = self.db.collection::<User>("users").count_documents(doc! {
-            "username": username.clone(),
+            "username": user.username.clone(),
         }).limit(1).await;
 
         match count_result {
-            Ok(count) => if count != 0 { return Err(NewUserError::UsernameTaken); },
+            Ok(count) => if count != 0 { return Err(NearsayError::UsernameTaken); },
             Err(mongo_err) => {
                 eprintln!("mongodb error when checking if username taken: {}", &mongo_err);
-                return Err(NewUserError::ServerError);
+                return Err(NearsayError::ServerError);
             },
         }
 
-        // generate jwt and csrf
-        let user_id = gen_id();
-        let Ok(jwt_and_csrf) = create_jwt_and_csrf_token(user_id.clone())
-        else { return Err(NewUserError::ServerError); };
-
         // hash password (again) to store in db
-        let serverhash = match hash(userhash, DEFAULT_COST) {
+        let serverhash = match hash(user.hash, DEFAULT_COST) {
             Ok(res) => res,
             Err(bcrypt_err) => {
                 eprintln!("bcrypt error when hashing userhash: {}", &bcrypt_err);
-                return Err(NewUserError::ServerError);
+                return Err(NearsayError::ServerError);
             },
         };
         
         // insert user data into db
         let insert_result = self.db.collection("users").insert_one(doc! {
-            "_id": user_id.clone(),
-            "username": username,
+            "_id": user._id,
+            "username": user.username,
             "hash": serverhash,
         }).await;
         if let Err(mongo_err) = insert_result {
             eprintln!("mongodb error when adding new user: {}", &mongo_err);
-            return Err(NewUserError::ServerError);
+            return Err(NearsayError::ServerError);
         }
 
-        Ok(jwt_and_csrf)
+        Ok(())
     }
 
     pub async fn add_post(&self, pos: &[f64], body: String) -> Result<(String, i64), MongoError> {
@@ -130,7 +128,7 @@ impl NearsayDB {
 
 use rand::Rng;
 
-fn gen_id() -> String {
+pub fn gen_id() -> String {
 
     let str = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-";
 
