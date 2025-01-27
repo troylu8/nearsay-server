@@ -77,6 +77,7 @@ pub enum NearsayError {
     UserNotFound,
     Unauthorized,
     UsernameTaken,
+    
 }
 impl IntoResponse for NearsayError {
     fn into_response(self) -> Response {

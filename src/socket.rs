@@ -62,7 +62,7 @@ async fn add_to_move_reponse(db: &NearsayDB, prev_region: &Option<TileRegion>, c
 
     while let Some(poi) = cursor.try_next().await.unwrap() {
         let has_been_updated = match timestamps.get(&poi._id.clone()) {
-            Some(prev_timestamp) => poi.timestamp > *prev_timestamp,
+            Some(prev_timestamp) => poi.updated > *prev_timestamp,
             None => true,
         };
         if has_been_updated {
