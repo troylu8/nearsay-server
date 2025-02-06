@@ -1,11 +1,14 @@
 
-use axum::{body::Body, extract::Path, http::{HeaderMap, StatusCode}, routing::{get, post}, Json, response::Response};
-use axum_extra::extract::CookieJar;
+use axum::{body::Body, extract::Path, http::{HeaderMap, StatusCode}, response::Response, routing::{get, post}, Json};
+use hmac::Hmac;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use sha2::Sha256;
 use socketioxide::SocketIo;
+use nearsay_server::{clone_into_closure, NearsayError};
 
-use crate::{area::emit_at_pos_with_data, auth::{authenticate, get_auth_info, create_user}, clone_into_closure, db::NearsayDB, types::POI};
+
+use crate::{auth::{authenticate_with_header, create_jwt, create_user}, db::NearsayDB};
 
 fn json_response<T: Serialize>(status: u16, serializable: T) -> Response<Body> {
     let body = Into::<Body>::into(serde_json::to_vec(&serializable).unwrap());
@@ -30,39 +33,53 @@ struct UserInfo {
     userhash: String
 }
 
-#[derive(Deserialize, Debug)]
-struct NewPostRequest {
-    pos: [f64; 2],
-    body: String
-}
 
-
-pub fn get_endpoints_router(db: NearsayDB, io: SocketIo) -> axum::Router {
+pub fn get_endpoints_router(db: NearsayDB, io: SocketIo, key: Hmac<Sha256>) -> axum::Router {
     axum::Router::new()
         .route("/sign-up", post(
             clone_into_closure! {
-                (db)
-                |Json(req): Json<UserInfo>| async move {
-                    create_user(&db, req.username, req.userhash).await
+                (db, key)
+                |Json(UserInfo{username, userhash})| async move {
+                    create_user(&key, &db, username, userhash).await
                 }
             }
         ))
         .route("/sign-in", post(
             clone_into_closure!{
-                (db)
-                |Json(req): Json<UserInfo>| async move {
-                    get_auth_info(&db, req.username, req.userhash).await
+                (db, key)
+                |Json(UserInfo{username, userhash})| async move {
+                    match db.get_user(username).await {
+                        Err(_) => Err(NearsayError::ServerError),
+                        Ok(None) => Err(NearsayError::UserNotFound),
+                        
+                        Ok(Some(user)) => {
+                            
+                            match bcrypt::verify(userhash, &user.hash[..]) {
+                                Ok(verified) => match verified {
+                                    true => match create_jwt(&key, user._id) {
+                                        Ok(auth_pair) => Ok(auth_pair),
+                                        Err(_) => Err(NearsayError::ServerError),
+                                    },
+                                    false => Err(NearsayError::Unauthorized),
+                                },
+                                Err(bcrypt_err) => {
+                                    eprintln!("bcrypt error when authorizing user: {}", bcrypt_err);
+                                    Err(NearsayError::ServerError)
+                                },
+                            }
+                        }
+                    }
                 }
             }
         ))
         .route("/vote/{post_id}", post(
             clone_into_closure! {
-                (db)
-                |headers: HeaderMap, cookies: CookieJar, Path(post_id): Path<String>, vote_type: String| async move {
+                (db, key)
+                |headers: HeaderMap, Path(post_id): Path<String>, vote_type: String| async move {
 
-                    match authenticate(&headers, &cookies) {
-                        Err(_) => StatusCode::UNAUTHORIZED,
-                        Ok(uid) => {
+                    match authenticate_with_header(&key, &headers) {
+                        Err(_) | Ok(None) => StatusCode::UNAUTHORIZED,
+                        Ok(Some(uid)) => {
                             println!("voted {} as {} ", vote_type, uid);
 
                             match db.insert_vote(uid, post_id, vote_type.into()).await {
@@ -76,18 +93,18 @@ pub fn get_endpoints_router(db: NearsayDB, io: SocketIo) -> axum::Router {
         ))
         .route("/posts/{post_id}", get(
             clone_into_closure! {
-                (db)
-                |headers: HeaderMap, cookies: CookieJar, Path(post_id): Path<String>| async move { 
+                (db, key)
+                |headers: HeaderMap, Path(post_id): Path<String>| async move { 
                     match db.get_post(post_id.clone()).await {
                         Err(_) => empty_response(500),
                         Ok(None) => empty_response(404),
                         Ok(Some(post)) => {
-                            match authenticate(&headers, &cookies) {
+                            match authenticate_with_header(&key, &headers) {
 
                                 // if authentication fails, respond with just the post anyway
-                                Err(_) => json_response(200, json! ({"post": post})),
+                                Err(_) | Ok(None) => json_response(200, json! ({"post": post})),
 
-                                Ok(uid) => {
+                                Ok(Some(uid)) => {
                                     match db.get_vote(uid, post_id).await {
 
                                         // if getting vote fails, respond with just the post
@@ -106,26 +123,26 @@ pub fn get_endpoints_router(db: NearsayDB, io: SocketIo) -> axum::Router {
                 }
             }
         ))
-        .route("/posts", post(
-            clone_into_closure! {
-                (db, io)
-                |Json(req): Json<NewPostRequest>| async move {
+        // .route("/posts", post(
+        //     clone_into_closure! {
+        //         (db, io)
+        //         |Json(req): Json<NewPostRequest>| async move {
                     
-                    match db.insert_post(&req.pos, req.body).await {
-                        Err(_) => empty_response(500),
-                        Ok((_id, updated)) => {
-                            emit_at_pos_with_data(io, req.pos, "new-poi", & POI{ 
-                                _id: _id.clone(), 
-                                pos: req.pos, 
-                                variant: String::from("post"), 
-                                updated: updated as u64
-                            });
+        //             match db.insert_post(&req.pos, req.body).await {
+        //                 Err(_) => empty_response(500),
+        //                 Ok((_id, updated)) => {
+        //                     emit_at_pos_with_data(io, req.pos, "new-poi", & POI{ 
+        //                         _id: _id.clone(),
+        //                         pos: req.pos, 
+        //                         variant: String::from("post"), 
+        //                         updated: updated as u64
+        //                     });
 
-                            json_response(200, json!({"_id": _id, "updated": updated}))
-                        },
-                    }
+        //                     json_response(200, json!({"_id": _id, "updated": updated}))
+        //                 },
+        //             }
 
-                }
-            }
-        ))
+        //         }
+        //     }
+        // ))
 }

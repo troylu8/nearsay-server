@@ -1,16 +1,16 @@
 
 use db::NearsayDB;
 use endpoints::get_endpoints_router;
-use socket::attach_socket_events;
+use socket::on_socket_connect;
 use socketioxide::SocketIo;
 use tower_http::cors::CorsLayer;
+use nearsay_server::clone_into_closure;
 
 mod area;
 mod types;
 mod db;
 mod delete_old;
 mod endpoints;
-mod clone_into_closure;
 mod socket;
 mod auth;
 
@@ -21,11 +21,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (socketio_layer, io) = SocketIo::new_layer();
 
     // delete_old::begin(db.db.clone());
-    
-    attach_socket_events(db.clone(), io.clone());
+
+    let key = auth::get_auth_key();
+
+    io.ns("/", clone_into_closure! { 
+        (db, key) 
+        move |client_socket| on_socket_connect(client_socket, db, key) 
+    });
+
 
     let app = axum::Router::new()
-        .merge(get_endpoints_router(db.clone(), io.clone()))
+        .merge(get_endpoints_router(db.clone(), io.clone(), key))
         .layer(socketio_layer)
         .layer(CorsLayer::permissive());
 

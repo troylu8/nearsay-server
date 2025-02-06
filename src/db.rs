@@ -4,8 +4,9 @@ use bcrypt::{hash, DEFAULT_COST};
 use mongodb::{ 
     bson::doc, options::Hint, Client, Cursor, Database, error::Error as MongoError
 };
+use nearsay_server::NearsayError;
 
-use crate::{area::Rect, auth::NearsayError, delete_old::today, types::{Post, User, UserVotes, POI}};
+use crate::{area::Rect, delete_old::today, types::{Post, User, UserVotes, POI}};
 
 #[derive(PartialEq)]
 pub enum Vote { Like, Dislike, None }
@@ -95,10 +96,28 @@ impl NearsayDB {
             return Err(NearsayError::ServerError);
         }
 
+
         Ok(())
     }
 
-    pub async fn insert_post(&self, pos: &[f64], body: String) -> Result<(String, i64), MongoError> {
+    pub async fn move_user(&self, uid: String, pos: &[f64; 2]) -> Result<(), MongoError> {
+        todo!()
+    }
+
+    pub async fn get_post(&self, post_id: String) -> Result<Option<Post>, MongoError> {
+        match self.db.collection::<Post>("posts")
+            .find_one(doc!{"_id": post_id})
+            .await
+        {
+            Err(mongo_err) => {
+                eprintln!("error getting post {}", mongo_err);
+                Err(mongo_err)
+            },
+            other => other
+        }
+    }
+
+    pub async fn insert_post(&self, author: &str, pos: &[f64], body: String) -> Result<(String, i64), MongoError> {
         
         let _id = gen_id();
         let millis: i64 = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_millis().try_into().expect("current time millis doesnt fit into i64");
@@ -115,6 +134,8 @@ impl NearsayDB {
 
         if let Err(mongo_err) = self.db.collection("posts").insert_one(doc! {
             "_id": _id.clone(),
+            "author": author,
+            "pos": pos,
             "body": body,
             "likes": 0,
             "dislikes": 0,
@@ -127,6 +148,7 @@ impl NearsayDB {
 
         Ok((_id, millis))
     }
+    
 
     pub async fn get_vote(&self, uid: String, post_id: String) -> Result<Vote, MongoError> {
         let res = self.db.collection::<UserVotes>("users")
@@ -213,18 +235,7 @@ impl NearsayDB {
         Ok(())
     }
 
-    pub async fn get_post(&self, post_id: String) -> Result<Option<Post>, MongoError> {
-        match self.db.collection::<Post>("posts")
-            .find_one(doc!{"_id": post_id})
-            .await
-        {
-            Err(mongo_err) => {
-                eprintln!("error getting post {}", mongo_err);
-                Err(mongo_err)
-            },
-            other => other
-        }
-    }
+    
 
     pub async fn search_pois(&self, within: &Rect<f64>, exclude: Option<&Rect<f64>>) -> Cursor<POI> {
 

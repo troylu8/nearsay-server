@@ -1,5 +1,5 @@
 use tokio_cron_scheduler::{Job, JobScheduler, JobSchedulerError};
-use std::{thread, time::{Duration, SystemTime}};
+use std::time::SystemTime;
 use mongodb::{bson::doc, Database};
 
 use crate::types::POI;

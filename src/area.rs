@@ -2,7 +2,7 @@ use mongodb::bson::{doc, Bson, Document};
 use serde::{Serialize, Deserialize};
 
 use num_cmp::NumCmp;
-use socketioxide::{extract::SocketRef, SocketIo};
+use socketioxide::extract::SocketRef;
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct TileRegion {
@@ -52,10 +52,8 @@ impl<T: Into<Bson> + Copy> Rect<T> {
     }
 }
 
-pub fn emit_at_pos(io: SocketIo, pos: [f64; 2], event: &str) {
-    emit_at_pos_with_data::<()>(io, pos, event, &());
-}
-pub fn emit_at_pos_with_data<T: Sized + Serialize>(io: SocketIo, pos: [f64; 2], event: &str, data: &T) {
+
+pub fn emit_at_pos<T: Sized + Serialize>(io: SocketRef, pos: [f64; 2], event: &str, data: &T) {
     let [x, y] = pos;
 
     let mut area = Rect {
@@ -64,7 +62,7 @@ pub fn emit_at_pos_with_data<T: Sized + Serialize>(io: SocketIo, pos: [f64; 2], 
         top: TileRegion::BOUND as f64, 
         bottom: -(TileRegion::BOUND as f64)
     };
-
+    
     io.to(get_room(0, area.left, area.bottom)).emit(event, data).unwrap();
     
     for depth in 1..=19 {
