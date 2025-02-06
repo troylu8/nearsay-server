@@ -23,7 +23,7 @@ pub async fn begin(db: Database) -> Result<(), JobSchedulerError> {
 
             Box::pin(async move {
 
-                let res = db.collection::<POI>("poi")
+                let res = db.collection::<POI>("pois")
                     .delete_many(doc! { "expiry": {"$lt": today() as i32} }).await;
                 
                 println!("delete old posts execution result: {:?}", res);

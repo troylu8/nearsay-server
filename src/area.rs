@@ -52,8 +52,9 @@ impl<T: Into<Bson> + Copy> Rect<T> {
     }
 }
 
+pub enum BroadcastTargets { IncludingSelf, ExcludingSelf }
 
-pub fn emit_at_pos<T: Sized + Serialize>(io: SocketRef, pos: [f64; 2], event: &str, data: &T) {
+pub fn broadcast_at<T: Sized + Serialize>(io: SocketRef, pos: [f64; 2], event: &str, targets: BroadcastTargets, data: &T) {
     let [x, y] = pos;
 
     let mut area = Rect {
@@ -62,8 +63,15 @@ pub fn emit_at_pos<T: Sized + Serialize>(io: SocketRef, pos: [f64; 2], event: &s
         top: TileRegion::BOUND as f64, 
         bottom: -(TileRegion::BOUND as f64)
     };
+
+    let broadcast = |room: String,| {
+        match targets {
+            BroadcastTargets::IncludingSelf => io.within(room),
+            BroadcastTargets::ExcludingSelf => io.to(room),
+        }.emit(event, data).unwrap();
+    };
     
-    io.to(get_room(0, area.left, area.bottom)).emit(event, data).unwrap();
+    broadcast(get_room(0, area.left, area.bottom));
     
     for depth in 1..=19 {
         
@@ -75,8 +83,8 @@ pub fn emit_at_pos<T: Sized + Serialize>(io: SocketRef, pos: [f64; 2], event: &s
         
         if y >= mid_y { area.bottom = mid_y; }
         else { area.top = mid_y; }
-        
-        io.to(get_room(depth, area.left, area.bottom)).emit(event, data).unwrap();
+
+        broadcast(get_room(depth, area.left, area.bottom));
     }
 }
 
@@ -89,7 +97,7 @@ pub fn update_rooms(client_socket: &SocketRef, tilereg: &TileRegion)  {
 
     let tile_size = tilereg.get_tile_size();
     let width = ((tilereg.area.right - tilereg.area.left) / tile_size).ceil() as usize;
-    let height = ((tilereg.area.top - tilereg.area.bottom) / tile_size).ceil() as usize;
+    let height = ((tilereg.area.top - tilereg.area.bottom) / tile_size).ceil() as usize;    
     
     for x in 0..width {
         for y in 0..height {

@@ -2,7 +2,7 @@
 use std::time::SystemTime;
 use bcrypt::{hash, DEFAULT_COST};
 use mongodb::{ 
-    bson::doc, options::Hint, Client, Cursor, Database, error::Error as MongoError
+    bson::doc, error::Error as MongoError, options::Hint, Client, Cursor, Database
 };
 use nearsay_server::NearsayError;
 
@@ -52,7 +52,7 @@ impl NearsayDB {
         }
     }
 
-    pub async fn get_user(&self, username: String) -> Result<Option<User>, MongoError> {
+    pub async fn get_user(&self, username: &str) -> Result<Option<User>, MongoError> {
         let get_user_req = self.db.collection::<User>("users").find_one(doc! {"username": username}).await;
 
         if let Err(mongo_err) = &get_user_req {
@@ -62,11 +62,11 @@ impl NearsayDB {
         get_user_req
     }
 
-    pub async fn insert_user(&self, user: User) -> Result<(), NearsayError> {
+    pub async fn insert_user(&self, id: &str, username: &str, userhash: &str) -> Result<(), NearsayError> {
 
         // check if username is taken
         let count_result = self.db.collection::<User>("users").count_documents(doc! {
-            "username": user.username.clone(),
+            "username": username
         }).limit(1).await;
 
         match count_result {
@@ -78,7 +78,7 @@ impl NearsayDB {
         }
 
         // hash password (again) to store in db
-        let serverhash = match hash(user.hash, DEFAULT_COST) {
+        let serverhash = match hash(userhash, DEFAULT_COST) {
             Ok(res) => res,
             Err(bcrypt_err) => {
                 eprintln!("bcrypt error when hashing userhash: {}", &bcrypt_err);
@@ -88,8 +88,8 @@ impl NearsayDB {
         
         // insert user data into db
         if let Err(mongo_err) = self.db.collection("users").insert_one(doc! {
-            "_id": user._id,
-            "username": user.username,
+            "_id": id,
+            "username": username,
             "hash": serverhash,
         }).await {
             eprintln!("mongodb error when adding new user: {}", &mongo_err);
@@ -100,11 +100,21 @@ impl NearsayDB {
         Ok(())
     }
 
-    pub async fn move_user(&self, uid: String, pos: &[f64; 2]) -> Result<(), MongoError> {
-        todo!()
+    pub async fn move_poi(&self, poi_id: &str, new_pos: &[f64]) -> Result<(), MongoError> {
+        
+        let res = self.db.collection::<POI>("pois").update_one(
+                doc! { "_id": poi_id },
+                doc! { "pos": new_pos }
+            )
+            .upsert(true)
+            .await;
+
+        if let Err(mongo_err) = &res { eprintln!("error moving poi: {}", mongo_err); }
+        
+        Ok(())
     }
 
-    pub async fn get_post(&self, post_id: String) -> Result<Option<Post>, MongoError> {
+    pub async fn get_post(&self, post_id: &str) -> Result<Option<Post>, MongoError> {
         match self.db.collection::<Post>("posts")
             .find_one(doc!{"_id": post_id})
             .await
@@ -117,13 +127,13 @@ impl NearsayDB {
         }
     }
 
-    pub async fn insert_post(&self, author: &str, pos: &[f64], body: String) -> Result<(String, i64), MongoError> {
+    pub async fn insert_post(&self, author: &str, pos: &[f64], body: &str) -> Result<(String, i64), MongoError> {
         
-        let _id = gen_id();
+        let post_id = gen_id();
         let millis: i64 = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_millis().try_into().expect("current time millis doesnt fit into i64");
 
         if let Err(mongo_err) = self.db.collection("pois").insert_one(doc! {
-            "_id": _id.clone(),
+            "_id": post_id.clone(),
             "pos": pos,
             "variant": "post".to_string(),
             "updated": millis,
@@ -133,9 +143,8 @@ impl NearsayDB {
         }
 
         if let Err(mongo_err) = self.db.collection("posts").insert_one(doc! {
-            "_id": _id.clone(),
+            "_id": post_id.clone(),
             "author": author,
-            "pos": pos,
             "body": body,
             "likes": 0,
             "dislikes": 0,
@@ -146,19 +155,19 @@ impl NearsayDB {
             return Err(mongo_err);
         }
 
-        Ok((_id, millis))
+        Ok((post_id, millis))
     }
     
 
-    pub async fn get_vote(&self, uid: String, post_id: String) -> Result<Vote, MongoError> {
+    pub async fn get_vote(&self, uid: &str, post_id: &str) -> Result<Vote, MongoError> {
         let res = self.db.collection::<UserVotes>("users")
             .find_one(doc! { "_id": uid })
-            .projection(doc! { format!("votes.{}", post_id.clone()): 1 }) 
+            .projection(doc! { format!("votes.{}", post_id): 1 }) 
             .await;
         
         match res {
             Ok(Some(user_vote)) => {
-                match user_vote.votes.get(&post_id) {
+                match user_vote.votes.get(post_id) {
                     Some(vote) => Ok(vote.clone().into()),
                     None => Ok(Vote::None),
                 }
@@ -171,9 +180,9 @@ impl NearsayDB {
         }
     }
 
-    pub async fn insert_vote(&self, uid: String, post_id: String, vote: Vote) -> Result<(), MongoError> {
+    pub async fn insert_vote(&self, uid: &str, post_id: &str, vote: Vote) -> Result<(), MongoError> {
 
-        let prev_vote = self.get_vote(uid.clone(), post_id.clone()).await?;
+        let prev_vote = self.get_vote(uid, post_id).await?;
 
         if vote == prev_vote { return Ok(()); }
 
@@ -199,24 +208,22 @@ impl NearsayDB {
             return Err(mongo_err);
         }
         
-        let delta_likes = 
-            match vote {
-                Vote::Like => 1,
-                _ => match prev_vote {
-                    Vote::Like => -1,
-                    _ => 0,
-                },
-            };
-        let delta_dislikes = 
-            match vote {
-                Vote::Dislike => 1,
-                _ => match prev_vote {
-                    Vote::Dislike => -1,
-                    _ => 0,
-                },
-            };
+        let delta_likes = match vote {
+            Vote::Like => 1,
+            _ => match prev_vote {
+                Vote::Like => -1,
+                _ => 0,
+            },
+        };
+        let delta_dislikes = match vote {
+            Vote::Dislike => 1,
+            _ => match prev_vote {
+                Vote::Dislike => -1,
+                _ => 0,
+            },
+        };
 
-        if let Err(mongo_err) = self.db.collection::<Post>("poi")
+        if let Err(mongo_err) = self.db.collection::<Post>("pois")
             .update_one(
                 doc! {"_id": post_id},
                 doc! {
@@ -235,7 +242,13 @@ impl NearsayDB {
         Ok(())
     }
 
-    
+    pub async fn get_poi(&self, id: &str) -> Result<Option<POI>, MongoError> {
+        let res = self.db.collection::<POI>("pois").find_one(doc! { "_id": id }).await;
+
+        if let Err(mongo_err) = &res { eprintln!("error getting poi: {}", mongo_err); }
+
+        res
+    }
 
     pub async fn search_pois(&self, within: &Rect<f64>, exclude: Option<&Rect<f64>>) -> Cursor<POI> {
 
@@ -253,7 +266,7 @@ impl NearsayDB {
             }
         };
     
-        self.db.collection::<POI>("poi")
+        self.db.collection::<POI>("pois")
             .find(query)
             .projection(doc! { "data": 0 })
             .hint( Hint::Name(String::from("pos_2dsphere")) )

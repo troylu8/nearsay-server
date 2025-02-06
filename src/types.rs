@@ -12,7 +12,6 @@ pub struct POI {
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Post {
     pub author: String,
-    pub pos: [f64; 2],
     pub body: String,
     pub likes: usize,
     pub dislikes: usize,

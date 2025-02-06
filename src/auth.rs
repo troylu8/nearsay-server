@@ -2,9 +2,16 @@ use axum::http::{header::AUTHORIZATION, HeaderMap};
 use hmac::{Hmac, Mac};
 use jwt::{SignWithKey, VerifyWithKey};
 use nearsay_server::NearsayError;
+use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 
-use crate::{db::{gen_id, NearsayDB}, types::User};
+use crate::db::{gen_id, NearsayDB};
+
+
+#[derive(Serialize, Deserialize)]
+pub struct JWTPayload {
+    uid: String
+}
 
 
 pub fn get_auth_key() -> Hmac<Sha256> {
@@ -14,7 +21,9 @@ pub fn get_auth_key() -> Hmac<Sha256> {
 /// returns (jwt, csrf_token)
 pub fn create_jwt(key: &Hmac<Sha256>, uid: String) -> Result<String, ()> {
     
-    match uid.sign_with_key(key) {
+    let payload = JWTPayload { uid };
+
+    match payload.sign_with_key(key) {
         Ok(jwt) => Ok(jwt),
         Err(jwt_err) => {
             eprintln!("error creating jwt: {}", jwt_err);
@@ -46,8 +55,10 @@ pub fn authenticate_with_header(key: &Hmac<Sha256>, headers: &HeaderMap) -> Resu
 /// if successful, returns `uid`
 pub fn authenticate_jwt(key: &Hmac<Sha256>, jwt: &str) -> Result<String, ()> {
 
-    match jwt.verify_with_key(key) {
-        Ok(uid) => Ok(uid),
+    let verification_result: Result<JWTPayload, jwt::Error> = jwt.verify_with_key(key);
+
+    match verification_result {
+        Ok( JWTPayload { uid } ) => Ok(uid),
         Err(jwt_err) => {
             eprintln!("error authenticating jwt: {}", jwt_err);
             Err(())
@@ -59,19 +70,13 @@ pub fn authenticate_jwt(key: &Hmac<Sha256>, jwt: &str) -> Result<String, ()> {
 
 
 /// returns Ok(uid) if successful
-pub async fn create_user(key: &Hmac<Sha256>, db: &NearsayDB, username: String, userhash: String) -> Result<String, NearsayError> {
+pub async fn create_user(key: &Hmac<Sha256>, db: &NearsayDB, username: &str, userhash: &str) -> Result<String, NearsayError> {
     let uid = gen_id();
 
-    match create_jwt(key, uid.clone()) {
+    match create_jwt(key, uid) {
         Err(_) => Err(NearsayError::ServerError),
         Ok(uid) => {
-            let user = User {
-                _id: uid.clone(),
-                username,
-                hash: userhash,
-            };
-
-            match db.insert_user(user).await {
+            match db.insert_user(&uid, username, userhash).await {
                 Ok(_) => Ok(uid),
                 Err(err) => Err(err)
             }

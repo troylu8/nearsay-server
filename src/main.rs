@@ -26,12 +26,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     io.ns("/", clone_into_closure! { 
         (db, key) 
-        move |client_socket| on_socket_connect(client_socket, db, key) 
+        move |client_socket| on_socket_connect(client_socket, &db, &key) 
     });
 
 
     let app = axum::Router::new()
-        .merge(get_endpoints_router(db.clone(), io.clone(), key))
+        .merge(get_endpoints_router(&db, &key))
         .layer(socketio_layer)
         .layer(CorsLayer::permissive());
 

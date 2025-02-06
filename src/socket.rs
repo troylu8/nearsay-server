@@ -4,11 +4,11 @@ use futures::TryStreamExt;
 use hmac::Hmac;
 use serde::{Deserialize, Serialize};
 use nearsay_server::clone_into_closure;
-use serde_json::json;
+use serde_json::{json, Value};
 use sha2::Sha256;
 use socketioxide::extract::{AckSender, Data, SocketRef};
 
-use crate::{area::{emit_at_pos, update_rooms, TileRegion}, auth::authenticate_jwt, db::NearsayDB, types::POI};
+use crate::{area::{broadcast_at, update_rooms, BroadcastTargets, TileRegion}, auth::authenticate_jwt, db::NearsayDB, types::POI};
 
 #[derive(Serialize, Deserialize, Debug)]
 struct ViewShiftedData {
@@ -40,10 +40,10 @@ struct NewPostData {
     body: String
 }
 
-pub fn on_socket_connect(client_socket: SocketRef, db: NearsayDB, key: Hmac<Sha256>) {
+pub fn on_socket_connect(client_socket: SocketRef, db: &NearsayDB, key: &Hmac<Sha256>) {
     
     client_socket.on(
-        "shift-view",
+        "view-shift",
         clone_into_closure! {
             (db)
             |client_socket: SocketRef, Data(ViewShiftedData {curr, prev, timestamps}), ack: AckSender| async move {
@@ -57,7 +57,6 @@ pub fn on_socket_connect(client_socket: SocketRef, db: NearsayDB, key: Hmac<Sha2
                 }
     
                 ack.send( &json!(resp) ).unwrap();
-    
             }
         }
     );
@@ -69,8 +68,8 @@ pub fn on_socket_connect(client_socket: SocketRef, db: NearsayDB, key: Hmac<Sha2
             |client_socket: SocketRef, Data(move_data): Data<MoveData>| async move {
                 let Ok(uid) = authenticate_jwt(&key, &move_data.jwt) else { return };
 
-                if db.move_user(uid, &move_data.pos).await.is_ok() {
-                    emit_at_pos(client_socket, move_data.pos, "someone-moved", &move_data);
+                if db.move_poi(&uid, &move_data.pos).await.is_ok() {
+                    broadcast_at(client_socket, move_data.pos, "someone-moved", BroadcastTargets::ExcludingSelf, &move_data);
                 }
             }
         }
@@ -81,7 +80,7 @@ pub fn on_socket_connect(client_socket: SocketRef, db: NearsayDB, key: Hmac<Sha2
         clone_into_closure! {
             (db, key)
             |client_socket: SocketRef, Data(NewPostData {jwt, pos, body})| async move {
-                
+
                 let author = match jwt {
                     None => "anonymous".to_string(),
                     Some(jwt) => match authenticate_jwt(&key, &jwt) {
@@ -90,12 +89,12 @@ pub fn on_socket_connect(client_socket: SocketRef, db: NearsayDB, key: Hmac<Sha2
                     }
                 };
                 
-                if let Ok((post_id, ms_created)) = db.insert_post(&author, &pos, body).await {
-                    emit_at_pos(client_socket, pos, "someone-posted", 
+                if let Ok((post_id, ms_created)) = db.insert_post(&author, &pos, &body).await {
+                    broadcast_at(client_socket, pos, "new-poi", BroadcastTargets::IncludingSelf,
                         &POI { 
-                            _id: post_id, 
+                            _id: post_id.clone(), 
                             pos, 
-                            variant: "POST".to_string(), 
+                            variant: "post".to_string(), 
                             updated: ms_created as u64
                         }
                     );
