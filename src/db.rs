@@ -2,13 +2,13 @@
 use std::time::SystemTime;
 use bcrypt::{hash, DEFAULT_COST};
 use mongodb::{ 
-    bson::doc, error::Error as MongoError, options::Hint, Client, Cursor, Database
+    bson::doc, error::Error as MongoError, options::Hint, results::UpdateResult, Client, Cursor, Database
 };
 use nearsay_server::NearsayError;
 
 use crate::{area::Rect, delete_old::today, types::{Post, User, UserVotes, POI}};
 
-#[derive(PartialEq)]
+#[derive(Debug, PartialEq, Clone)]
 pub enum Vote { Like, Dislike, None }
 
 impl Vote {
@@ -91,6 +91,7 @@ impl NearsayDB {
             "_id": id,
             "username": username,
             "hash": serverhash,
+            "votes": {}
         }).await {
             eprintln!("mongodb error when adding new user: {}", &mongo_err);
             return Err(NearsayError::ServerError);
@@ -198,7 +199,7 @@ impl NearsayDB {
                 self.db.collection::<User>("users")
                     .update_one( 
                         doc! {"_id": uid}, 
-                        doc! { "$set": { format!("votes.{}", post_id): vote.as_lifetime_weight() }}
+                        doc! { "$set": { format!("votes.{}", post_id): Into::<String>::into(vote.clone()) }}
                     ).await
             }
         };
@@ -223,7 +224,7 @@ impl NearsayDB {
             },
         };
 
-        if let Err(mongo_err) = self.db.collection::<Post>("pois")
+        if let Err(mongo_err) = self.db.collection::<Post>("posts")
             .update_one(
                 doc! {"_id": post_id},
                 doc! {
@@ -240,6 +241,26 @@ impl NearsayDB {
         }
 
         Ok(())
+    }
+
+    pub async fn increment_view(&self, post_id: &str) -> Result<UpdateResult, MongoError> {
+
+        let res = self.db.collection::<Post>("posts")
+            .update_one(
+                doc! { "_id": post_id }, 
+                doc! { "$inc": { 
+                    "views": 1,
+                    "expiry": 1,
+                } }
+            ).await;
+
+        match res {
+            Err(mongo_err) => {
+                eprintln!("error incrementing view: {}", mongo_err);
+                return Err(mongo_err);
+            },
+            other => other,
+        }   
     }
 
     pub async fn get_poi(&self, id: &str) -> Result<Option<POI>, MongoError> {

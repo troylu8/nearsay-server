@@ -35,6 +35,8 @@ struct UserInfo {
 
 pub fn get_endpoints_router(db: &NearsayDB, key: &Hmac<Sha256>) -> axum::Router {
     axum::Router::new()
+    
+        // for creating an account
         .route("/sign-up", post(
             clone_into_closure! {
                 (db, key)
@@ -43,6 +45,8 @@ pub fn get_endpoints_router(db: &NearsayDB, key: &Hmac<Sha256>) -> axum::Router 
                 }
             }
         ))
+
+        // for getting the jwt from username and password
         .route("/sign-in", post(
             clone_into_closure!{
                 (db, key)
@@ -54,16 +58,16 @@ pub fn get_endpoints_router(db: &NearsayDB, key: &Hmac<Sha256>) -> axum::Router 
                         Ok(Some(user)) => {
                             
                             match bcrypt::verify(userhash, &user.hash[..]) {
-                                Ok(verified) => match verified {
-                                    true => match create_jwt(&key, user._id) {
-                                        Ok(auth_pair) => Ok(auth_pair),
-                                        Err(_) => Err(NearsayError::ServerError),
-                                    },
-                                    false => Err(NearsayError::Unauthorized),
-                                },
                                 Err(bcrypt_err) => {
                                     eprintln!("bcrypt error when authorizing user: {}", bcrypt_err);
                                     Err(NearsayError::ServerError)
+                                },
+                                Ok(verified) => match verified {
+                                    true => match create_jwt(&key, user._id) {
+                                        Ok(jwt) => Ok(jwt),
+                                        Err(_) => Err(NearsayError::ServerError),
+                                    },
+                                    false => Err(NearsayError::Unauthorized),
                                 },
                             }
                         }
@@ -71,6 +75,7 @@ pub fn get_endpoints_router(db: &NearsayDB, key: &Hmac<Sha256>) -> axum::Router 
                 }
             }
         ))
+
         .route("/vote/{post_id}", post(
             clone_into_closure! {
                 (db, key)
@@ -79,8 +84,6 @@ pub fn get_endpoints_router(db: &NearsayDB, key: &Hmac<Sha256>) -> axum::Router 
                     match authenticate_with_header(&key, &headers) {
                         Err(_) | Ok(None) => StatusCode::UNAUTHORIZED,
                         Ok(Some(uid)) => {
-                            println!("voted {} as {} ", vote_type, uid);
-
                             match db.insert_vote(&uid, &post_id, vote_type.into()).await {
                                 Ok(_) => StatusCode::OK,
                                 Err(_) => StatusCode::INTERNAL_SERVER_ERROR,
@@ -94,6 +97,12 @@ pub fn get_endpoints_router(db: &NearsayDB, key: &Hmac<Sha256>) -> axum::Router 
             clone_into_closure! {
                 (db, key)
                 |headers: HeaderMap, Path(post_id): Path<String>| async move { 
+
+                    if headers.contains_key("Increment-View") {
+                        if let Ok(res) = db.increment_view(&post_id).await {
+                            if res.modified_count == 0 { return empty_response(404) }
+                        }
+                    }
 
                     match db.get_post(&post_id).await {
                         Err(_) => empty_response(500),
@@ -112,7 +121,7 @@ pub fn get_endpoints_router(db: &NearsayDB, key: &Hmac<Sha256>) -> axum::Router 
                             
                             // if getting vote fails, respond with just the post
                             let Ok(vote) = db.get_vote(&uid, &post_id).await else { return json_response(200, response_body) };
-
+                            
                             response_body.as_object_mut().unwrap().insert("vote".to_string(), Value::String(vote.into()));
                             
                             json_response(200, response_body)

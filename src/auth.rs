@@ -69,15 +69,15 @@ pub fn authenticate_jwt(key: &Hmac<Sha256>, jwt: &str) -> Result<String, ()> {
 
 
 
-/// returns Ok(uid) if successful
+/// returns `Ok(jwt)` if successful
 pub async fn create_user(key: &Hmac<Sha256>, db: &NearsayDB, username: &str, userhash: &str) -> Result<String, NearsayError> {
     let uid = gen_id();
 
-    match create_jwt(key, uid) {
+    match create_jwt(key, uid.clone()) {
         Err(_) => Err(NearsayError::ServerError),
-        Ok(uid) => {
+        Ok(jwt) => {
             match db.insert_user(&uid, username, userhash).await {
-                Ok(_) => Ok(uid),
+                Ok(_) => Ok(jwt),
                 Err(err) => Err(err)
             }
         },
