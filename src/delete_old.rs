@@ -16,20 +16,20 @@ pub async fn begin(db: Database) -> Result<(), JobSchedulerError> {
 
     
     // Add async job
-    sched.add(
-        Job::new_async("* * * * * *", move |_, _| {
+    // sched.add(
+    //     Job::new_async("* * * * * *", move |_, _| {
 
-            let db = db.clone();
+    //         let db = db.clone();
 
-            Box::pin(async move {
+    //         Box::pin(async move {
 
-                let res = db.collection::<POI>("pois")
-                    .delete_many(doc! { "expiry": {"$lt": today() as i32} }).await;
+    //             let res = db.collection::<POI>("pois")
+    //                 .delete_many(doc! { "expiry": {"$lt": today() as i32} }).await;
                 
-                println!("delete old posts execution result: {:?}", res);
-            })
-        })?
-    ).await?;
+    //             println!("delete old posts execution result: {:?}", res);
+    //         })
+    //     })?
+    // ).await?;
 
     sched.start().await?;
 

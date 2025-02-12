@@ -1,16 +1,15 @@
 use axum::http::{header::AUTHORIZATION, HeaderMap};
 use hmac::{Hmac, Mac};
 use jwt::{SignWithKey, VerifyWithKey};
-use nearsay_server::NearsayError;
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 
-use crate::db::{gen_id, NearsayDB};
 
 
 #[derive(Serialize, Deserialize)]
 pub struct JWTPayload {
-    uid: String
+    pub uid: String,
+    pub username: String
 }
 
 
@@ -19,9 +18,9 @@ pub fn get_auth_key() -> Hmac<Sha256> {
 }
 
 /// returns (jwt, csrf_token)
-pub fn create_jwt(key: &Hmac<Sha256>, uid: String) -> Result<String, ()> {
+pub fn create_jwt(key: &Hmac<Sha256>, uid: String, username: String) -> Result<String, ()> {
     
-    let payload = JWTPayload { uid };
+    let payload = JWTPayload { uid, username };
 
     match payload.sign_with_key(key) {
         Ok(jwt) => Ok(jwt),
@@ -34,8 +33,8 @@ pub fn create_jwt(key: &Hmac<Sha256>, uid: String) -> Result<String, ()> {
 }
 
 
-/// returns None if no jwt, Some(uid) if success, Err() otherwise
-pub fn authenticate_with_header(key: &Hmac<Sha256>, headers: &HeaderMap) -> Result<Option<String>, ()> {
+/// returns None if no jwt, OK(Some(JWTPayload)) if success, Ok(None) if no header, Err() otherwise
+pub fn authenticate_with_header(key: &Hmac<Sha256>, headers: &HeaderMap) -> Result<Option<JWTPayload>, ()> {
     match headers.get(AUTHORIZATION) {
         None => Ok(None),
         Some(value) => {
@@ -45,7 +44,7 @@ pub fn authenticate_with_header(key: &Hmac<Sha256>, headers: &HeaderMap) -> Resu
             if !value.starts_with("Bearer ") {return Err(()); }
 
             match authenticate_jwt(key, &value[7..]) {
-                Ok(uid) => Ok(Some(uid)),
+                Ok(payload) => Ok(Some(payload)),
                 Err(err) => Err(err)
             }
         },
@@ -53,33 +52,17 @@ pub fn authenticate_with_header(key: &Hmac<Sha256>, headers: &HeaderMap) -> Resu
 }
 
 /// if successful, returns `uid`
-pub fn authenticate_jwt(key: &Hmac<Sha256>, jwt: &str) -> Result<String, ()> {
+pub fn authenticate_jwt(key: &Hmac<Sha256>, jwt: &str) -> Result<JWTPayload, ()> {
 
     let verification_result: Result<JWTPayload, jwt::Error> = jwt.verify_with_key(key);
 
     match verification_result {
-        Ok( JWTPayload { uid } ) => Ok(uid),
         Err(jwt_err) => {
             eprintln!("error authenticating jwt: {}", jwt_err);
             Err(())
         }
+        Ok(payload) => Ok(payload),
     }
 }
 
 
-
-
-/// returns `Ok(jwt)` if successful
-pub async fn create_user(key: &Hmac<Sha256>, db: &NearsayDB, username: &str, userhash: &str) -> Result<String, NearsayError> {
-    let uid = gen_id();
-
-    match create_jwt(key, uid.clone()) {
-        Err(_) => Err(NearsayError::ServerError),
-        Ok(jwt) => {
-            match db.insert_user(&uid, username, userhash).await {
-                Ok(_) => Ok(jwt),
-                Err(err) => Err(err)
-            }
-        },
-    }
-}

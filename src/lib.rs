@@ -1,3 +1,5 @@
+use std::time::SystemTime;
+
 use axum::{body::Body, http::StatusCode, response::{IntoResponse, Response}};
 
 
@@ -28,4 +30,8 @@ impl IntoResponse for NearsayError {
 
         Response::builder().status(status).body(Body::empty()).unwrap()
     }
+}
+
+pub fn current_time_ms() -> u64 {
+    SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_millis().try_into().expect("current time millis doesnt fit into i64")
 }

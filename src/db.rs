@@ -1,12 +1,13 @@
 
-use std::time::SystemTime;
+use std::time::{Instant, SystemTime};
 use bcrypt::{hash, DEFAULT_COST};
 use mongodb::{ 
-    bson::doc, error::Error as MongoError, options::Hint, results::UpdateResult, Client, Cursor, Database
+    bson::{bson, doc, Document}, error::Error as MongoError, options::Hint, results::UpdateResult, Client, Cursor, Database
 };
-use nearsay_server::NearsayError;
+use nearsay_server::{current_time_ms, NearsayError};
+use serde::{de::DeserializeOwned, Deserialize};
 
-use crate::{area::Rect, delete_old::today, types::{Post, User, UserVotes, POI}};
+use crate::{area::Rect, delete_old::today, types::{HasCollection, Post, User, UserVotes, POI}};
 
 #[derive(Debug, PartialEq, Clone)]
 pub enum Vote { Like, Dislike, None }
@@ -52,8 +53,28 @@ impl NearsayDB {
         }
     }
 
+    pub async fn get<T: Send + Sync + DeserializeOwned + HasCollection<T>>(&self, id: &str) -> Result<Option<T>, MongoError> {
+        match T::get_collection(&self.db)
+            .find_one(doc!{"_id": id})
+            .projection(doc! {"votes": 0})
+            .await
+        {
+            Err(mongo_err) => {
+                eprintln!("error getting item {}", mongo_err);
+                Err(mongo_err)
+            },
+            other => other
+        }
+    }
+
     pub async fn get_user(&self, username: &str) -> Result<Option<User>, MongoError> {
-        let get_user_req = self.db.collection::<User>("users").find_one(doc! {"username": username}).await;
+        let get_user_req = 
+            self.db.collection::<User>("users")
+            .find_one(doc! {"username": username})
+            .hint(Hint::Name("username_1".to_string()))
+            .await;
+
+        //TODO: test if votes are included in return obj
 
         if let Err(mongo_err) = &get_user_req {
             eprintln!("mongodb error when getting user: {}", &mongo_err);
@@ -62,7 +83,7 @@ impl NearsayDB {
         get_user_req
     }
 
-    pub async fn insert_user(&self, id: &str, username: &str, userhash: &str) -> Result<(), NearsayError> {
+    pub async fn insert_user(&self, id: &str, username: &str, userhash: &str, avatar: usize) -> Result<(), NearsayError> {
 
         // check if username is taken
         let count_result = self.db.collection::<User>("users").count_documents(doc! {
@@ -89,7 +110,11 @@ impl NearsayDB {
         // insert user data into db
         if let Err(mongo_err) = self.db.collection("users").insert_one(doc! {
             "_id": id,
+            // no position field yet
+            "updated": current_time_ms() as i64,
+            
             "username": username,
+            "avatar": avatar as i32,
             "hash": serverhash,
             "votes": {}
         }).await {
@@ -101,13 +126,13 @@ impl NearsayDB {
         Ok(())
     }
 
-    pub async fn move_poi(&self, poi_id: &str, new_pos: &[f64]) -> Result<(), MongoError> {
+    pub async fn move_user(&self, uid: &str, new_pos: &[f64]) -> Result<(), MongoError> {
         
-        let res = self.db.collection::<POI>("pois").update_one(
-                doc! { "_id": poi_id },
+        let res = self.db.collection::<User>("users").update_one(
+                doc! { "_id": uid },
                 doc! { "pos": new_pos }
             )
-            .upsert(true)
+            .upsert(true) //TODO: upsert?
             .await;
 
         if let Err(mongo_err) = &res { eprintln!("error moving poi: {}", mongo_err); }
@@ -115,36 +140,16 @@ impl NearsayDB {
         Ok(())
     }
 
-    pub async fn get_post(&self, post_id: &str) -> Result<Option<Post>, MongoError> {
-        match self.db.collection::<Post>("posts")
-            .find_one(doc!{"_id": post_id})
-            .await
-        {
-            Err(mongo_err) => {
-                eprintln!("error getting post {}", mongo_err);
-                Err(mongo_err)
-            },
-            other => other
-        }
-    }
-
     pub async fn insert_post(&self, author: &str, pos: &[f64], body: &str) -> Result<(String, i64), MongoError> {
         
         let post_id = gen_id();
-        let millis: i64 = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_millis().try_into().expect("current time millis doesnt fit into i64");
-
-        if let Err(mongo_err) = self.db.collection("pois").insert_one(doc! {
-            "_id": post_id.clone(),
-            "pos": pos,
-            "variant": "post".to_string(),
-            "updated": millis,
-        }).await {
-            eprintln!("error inserting new post poi {}", mongo_err);
-            return Err(mongo_err);
-        }
-
+        let millis: i64 = current_time_ms() as i64;
+        
         if let Err(mongo_err) = self.db.collection("posts").insert_one(doc! {
             "_id": post_id.clone(),
+            "pos": pos,
+            "updated": millis,
+
             "author": author,
             "body": body,
             "likes": 0,
@@ -263,34 +268,30 @@ impl NearsayDB {
         }   
     }
 
-    pub async fn get_poi(&self, id: &str) -> Result<Option<POI>, MongoError> {
-        let res = self.db.collection::<POI>("pois").find_one(doc! { "_id": id }).await;
-
-        if let Err(mongo_err) = &res { eprintln!("error getting poi: {}", mongo_err); }
-
-        res
-    }
-
-    pub async fn search_pois(&self, within: &Rect<f64>, exclude: Option<&Rect<f64>>) -> Cursor<POI> {
+    pub async fn get_pois<T: Send + Sync + POI + HasCollection<T>>(&self, within: &Rect<f64>, exclude: Option<&Rect<f64>>) -> Cursor<Document> {
 
         let query = match exclude {
             Some(exclude) => {
                 doc! {
-                    "$and": [
-                        {"pos": { "$geoWithin": within.as_geo_json() }},
-                        {"pos": { "$not": { "$geoWithin": exclude.as_geo_json() } }},
-                    ] 
+                    "$match": {
+                        "$and": [
+                            {"pos": { "$geoWithin": within.as_geo_json() }},
+                            {"pos": { "$not": { "$geoWithin": exclude.as_geo_json() } }},
+                        ] 
+                    }
                 }
             },
             None => doc! {
-                "pos": { "$geoWithin": within.as_geo_json() }
+                "$match": { "pos": { "$geoWithin": within.as_geo_json() } }
             }
         };
-    
-        self.db.collection::<POI>("pois")
-            .find(query)
-            .projection(doc! { "data": 0 })
-            .hint( Hint::Name(String::from("pos_2dsphere")) )
+
+        T::get_collection(&self.db)
+            .aggregate(vec! [
+                query,
+                T::get_poi_projection()
+            ])
+            .hint( Hint::Name("pos_2dsphere".to_string()) )
             .await.unwrap()
     }
 }
