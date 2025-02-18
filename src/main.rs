@@ -1,4 +1,4 @@
-
+use std::env;
 use db::NearsayDB;
 use endpoints::get_endpoints_router;
 use socket::on_socket_connect;
@@ -16,7 +16,8 @@ mod auth;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    
+    dotenvy::dotenv()?;
+
     let db = NearsayDB::new().await;
     let (socketio_layer, io) = SocketIo::new_layer();
 

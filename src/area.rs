@@ -52,6 +52,7 @@ impl<T: Into<Bson> + Copy> Rect<T> {
     }
 }
 
+#[derive(Debug)]
 pub enum BroadcastTargets { IncludingSelf, ExcludingSelf }
 
 pub fn broadcast_at<T: Sized + Serialize>(io: SocketRef, pos: [f64; 2], event: &str, targets: BroadcastTargets, data: &T) {
@@ -66,14 +67,14 @@ pub fn broadcast_at<T: Sized + Serialize>(io: SocketRef, pos: [f64; 2], event: &
 
     let broadcast = |room: String,| {
         match targets {
-            BroadcastTargets::IncludingSelf => io.within(room),
-            BroadcastTargets::ExcludingSelf => io.to(room),
+            BroadcastTargets::IncludingSelf => io.within(room.clone()),
+            BroadcastTargets::ExcludingSelf => io.to(room.clone()),
         }.emit(event, data).unwrap();
     };
     
     broadcast(get_room(0, area.left, area.bottom));
     
-    for depth in 1..=19 {
+    for depth in 1..=23 {
         
         let mid_x = (area.left + area.right) / 2.0;
         let mid_y = (area.top + area.bottom) / 2.0;

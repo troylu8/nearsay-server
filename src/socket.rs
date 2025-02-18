@@ -9,7 +9,7 @@ use serde_json::{json, Value};
 use sha2::Sha256;
 use socketioxide::extract::{AckSender, Data, SocketRef};
 
-use crate::{area::{broadcast_at, update_rooms, BroadcastTargets, Rect, TileRegion}, auth::{authenticate_jwt, JWTPayload}, db::NearsayDB, types::{HasCollection, Post, User, POI}};
+use crate::{area::{broadcast_at, update_rooms, BroadcastTargets, Rect, TileRegion}, auth::{authenticate_jwt, JWTPayload}, db::NearsayDB, types::{Post, User, POI}};
 
 #[derive(Serialize, Deserialize, Debug)]
 struct ViewShiftedData {
@@ -30,8 +30,9 @@ struct ViewShiftedResponse {
 
 #[derive(Serialize, Deserialize, Debug)]
 struct MoveData {
-    jwt: String,
-    pos: [f64; 2]
+    jwt: Option<String>,
+    uid: Option<String>,
+    pos: [f64; 2],
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -41,8 +42,14 @@ struct NewPostData {
     body: String
 }
 
-pub fn on_socket_connect(client_socket: SocketRef, db: &NearsayDB, key: &Hmac<Sha256>) {
+struct StartSessionData {
+    jwt: Option<String>,
+    uid: Option<String>,
     
+}
+
+pub fn on_socket_connect(client_socket: SocketRef, db: &NearsayDB, key: &Hmac<Sha256>) {
+
     client_socket.on(
         "view-shift",
         clone_into_closure! {
@@ -53,8 +60,8 @@ pub fn on_socket_connect(client_socket: SocketRef, db: &NearsayDB, key: &Hmac<Sh
                 for i in 0..curr.len() {
                     if let Some(curr_region) = &curr[i] {
                         update_rooms(&client_socket, curr_region);
-                        add_pois_to_move_resp::<User>(&db, &prev[i], curr_region, &timestamps, &mut resp).await;
-                        add_pois_to_move_resp::<Post>(&db, &prev[i], curr_region, &timestamps, &mut resp).await;
+                        add_pois_to_move_resp::<User>(&db, "users", &prev[i], curr_region, &timestamps, &mut resp).await;
+                        add_pois_to_move_resp::<Post>(&db, "posts", &prev[i], curr_region, &timestamps, &mut resp).await;
                     }
                 }
     
@@ -68,10 +75,25 @@ pub fn on_socket_connect(client_socket: SocketRef, db: &NearsayDB, key: &Hmac<Sh
         clone_into_closure! {
             (db, key)
             |client_socket: SocketRef, Data(move_data): Data<MoveData>| async move {
-                let Ok(JWTPayload {uid, ..}) = authenticate_jwt(&key, &move_data.jwt) else { return };
 
-                if db.move_user(&uid, &move_data.pos).await.is_ok() {
-                    broadcast_at(client_socket, move_data.pos, "someone-moved", BroadcastTargets::ExcludingSelf, &move_data);
+                let moved_user_id;
+
+                if let Some(jwt) = move_data.jwt {
+                    let Ok(JWTPayload {uid, ..}) = authenticate_jwt(&key, &jwt) else { return };
+                    moved_user_id = uid;
+                }
+                else if let Some(uid) = move_data.uid {
+                    moved_user_id = uid;
+                } 
+                else { return }
+                
+                if db.move_user(&moved_user_id, &move_data.pos).await.is_ok() {
+                    broadcast_at(client_socket, move_data.pos, "someone-moved", BroadcastTargets::ExcludingSelf, 
+                        &doc! {
+                            "uid": moved_user_id,
+                            "pos": &move_data.pos as &[f64]
+                        }
+                    );
                 }
             }
         }
@@ -99,7 +121,7 @@ pub fn on_socket_connect(client_socket: SocketRef, db: &NearsayDB, key: &Hmac<Sh
                         else { format!("{}...", body[..BLURB_LENGTH].to_string()) };
 
                     broadcast_at(client_socket, pos, "new-poi", BroadcastTargets::IncludingSelf,
-                        &doc! {
+                        & doc! {
                             "_id": post_id.clone(),
                             "pos": &pos as &[f64],
                             "kind": "post",
@@ -115,7 +137,7 @@ pub fn on_socket_connect(client_socket: SocketRef, db: &NearsayDB, key: &Hmac<Sh
 
 }
 
-async fn add_pois_to_move_resp<T: Send + Sync + POI + HasCollection<T>>(db: &NearsayDB, prev_region: &Option<TileRegion>, curr_region: &TileRegion, timestamps: &HashMap<String, i64>, resp: &mut ViewShiftedResponse) -> Option<Box<dyn std::error::Error>> {
+async fn add_pois_to_move_resp<T: Send + Sync + POI>(db: &NearsayDB, collection: &str, prev_region: &Option<TileRegion>, curr_region: &TileRegion, timestamps: &HashMap<String, i64>, resp: &mut ViewShiftedResponse) -> Option<Box<dyn std::error::Error>> {
     let exclude = match prev_region {
         Some(prev_region) => {
             if prev_region.area.envelops(&curr_region.area) { return None }
@@ -124,7 +146,7 @@ async fn add_pois_to_move_resp<T: Send + Sync + POI + HasCollection<T>>(db: &Nea
         None => None
     };
     
-    let mut cursor = db.get_pois::<T>(&curr_region.area, exclude).await;
+    let mut cursor = db.get_pois::<T>(collection, &curr_region.area, exclude).await;
     
     while let Some(poi) = cursor.try_next().await.unwrap() {
         

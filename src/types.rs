@@ -1,5 +1,5 @@
 use std::collections::BTreeMap;
-use mongodb::{bson::{doc, Document}, Collection, Database};
+use mongodb::bson::{doc, Document};
 use serde::{Deserialize, Serialize};
 
 // #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -10,9 +10,6 @@ use serde::{Deserialize, Serialize};
 //     pub updated: u64,
 // }
 
-pub trait HasCollection<T: Send + Sync> {
-    fn get_collection(db: &Database) -> Collection<T>;
-}
 pub trait POI {
     fn get_poi_projection() -> Document;
 }
@@ -30,11 +27,6 @@ pub struct Post {
     pub dislikes: usize,
     pub views: usize,
     pub expiry: usize,
-}
-impl HasCollection<Post> for Post {
-    fn get_collection(db: &Database) -> Collection<Post> {
-        db.collection("posts")
-    }
 }
 impl POI for Post {
     fn get_poi_projection() -> Document {
@@ -60,11 +52,6 @@ pub struct User {
     pub username: String,
     pub avatar: usize,
     pub hash: String,
-}
-impl HasCollection<User> for User {
-    fn get_collection(db: &Database) -> Collection<User> {
-        db.collection("users")
-    }
 }
 impl POI for User {
     fn get_poi_projection() -> Document {

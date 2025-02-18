@@ -1,3 +1,5 @@
+use std::env;
+
 use axum::http::{header::AUTHORIZATION, HeaderMap};
 use hmac::{Hmac, Mac};
 use jwt::{SignWithKey, VerifyWithKey};
@@ -9,18 +11,17 @@ use sha2::Sha256;
 #[derive(Serialize, Deserialize)]
 pub struct JWTPayload {
     pub uid: String,
-    pub username: String
 }
 
 
 pub fn get_auth_key() -> Hmac<Sha256> {
-    Hmac::new_from_slice(b"some-secret").unwrap()
+    Hmac::new_from_slice(env::var("JWT_SECRET").unwrap().as_bytes()).unwrap()
 }
 
 /// returns (jwt, csrf_token)
-pub fn create_jwt(key: &Hmac<Sha256>, uid: String, username: String) -> Result<String, ()> {
+pub fn create_jwt(key: &Hmac<Sha256>, uid: String) -> Result<String, ()> {
     
-    let payload = JWTPayload { uid, username };
+    let payload = JWTPayload { uid };
 
     match payload.sign_with_key(key) {
         Ok(jwt) => Ok(jwt),

@@ -7,7 +7,7 @@ use mongodb::{
 use nearsay_server::{current_time_ms, NearsayError};
 use serde::{de::DeserializeOwned, Deserialize};
 
-use crate::{area::Rect, delete_old::today, types::{HasCollection, Post, User, UserVotes, POI}};
+use crate::{area::Rect, delete_old::today, types::{Post, User, UserVotes, POI}};
 
 #[derive(Debug, PartialEq, Clone)]
 pub enum Vote { Like, Dislike, None }
@@ -53,44 +53,78 @@ impl NearsayDB {
         }
     }
 
-    pub async fn get<T: Send + Sync + DeserializeOwned + HasCollection<T>>(&self, id: &str) -> Result<Option<T>, MongoError> {
-        match T::get_collection(&self.db)
-            .find_one(doc!{"_id": id})
+    pub async fn get<T>(&self, collection: &str, id: &str) -> Result<Option<T>, ()> 
+    where T: Send + Sync + DeserializeOwned
+    {
+        match 
+            self.db.collection::<T>(collection)
+            .find_one( doc!{ "_id": id } )
             .projection(doc! {"votes": 0})
             .await
         {
             Err(mongo_err) => {
                 eprintln!("error getting item {}", mongo_err);
-                Err(mongo_err)
+                Err(())
             },
-            other => other
+            Ok(item) => Ok(item)
         }
     }
 
-    pub async fn get_user(&self, username: &str) -> Result<Option<User>, MongoError> {
-        let get_user_req = 
+    pub async fn delete(&self, collection: &str, id: &str) -> Result<(), ()> {
+        match 
+            self.db.collection::<Document>(collection)
+            .delete_one( doc!{ "_id": id } )
+            .await
+        {
+            Err(mongo_err) => {
+                eprintln!("error getting item {}", mongo_err);
+                Err(())
+            },
+            Ok(_) => Ok(())
+        }
+    }
+
+    pub async fn get_user(&self, username: &str) -> Result<Option<User>, ()> {
+        match 
             self.db.collection::<User>("users")
             .find_one(doc! {"username": username})
             .hint(Hint::Name("username_1".to_string()))
-            .await;
-
-        //TODO: test if votes are included in return obj
-
-        if let Err(mongo_err) = &get_user_req {
-            eprintln!("mongodb error when getting user: {}", &mongo_err);
+            .await
+        {
+            Err(mongo_err) => {
+                eprintln!("mongodb error when getting user: {}", &mongo_err);
+                Err(())
+            },
+            Ok(user) => Ok(user),
         }
 
-        get_user_req
+        //TODO: test if votes are included in return obj
     }
 
-    pub async fn insert_user(&self, id: &str, username: &str, userhash: &str, avatar: usize) -> Result<(), NearsayError> {
+    pub async fn insert_anon_session(&self, uid: &str, avatar: usize, pos: &[f64]) -> Result<(), ()> {
+        if let Err(mongo_err) = self.db.collection("users").insert_one(doc! {
+            "_id": uid,
+            "pos": pos,
+            "avatar": avatar as i32,
+            "updated": current_time_ms() as i64,
+        }).await {
+            eprintln!("mongodb error when starting anonymous session: {}", &mongo_err);
+            return Err(())
+        }
+
+        Ok(())
+    }
+
+    /// will replace anonymous sessions, but not preexisting users
+    pub async fn insert_user(&self, uid: &str, username: &str, userhash: &str, avatar: usize) -> Result<(), NearsayError> {
 
         // check if username is taken
-        let count_result = self.db.collection::<User>("users").count_documents(doc! {
-            "username": username
-        }).limit(1).await;
-
-        match count_result {
+        match
+            self.db.collection::<User>("users")
+            .count_documents(doc! {"username": username })
+            .limit(1)
+            .await 
+        {
             Ok(count) => if count != 0 { return Err(NearsayError::UsernameTaken); },
             Err(mongo_err) => {
                 eprintln!("mongodb error when checking if username taken: {}", &mongo_err);
@@ -100,45 +134,115 @@ impl NearsayDB {
 
         // hash password (again) to store in db
         let serverhash = match hash(userhash, DEFAULT_COST) {
-            Ok(res) => res,
             Err(bcrypt_err) => {
                 eprintln!("bcrypt error when hashing userhash: {}", &bcrypt_err);
                 return Err(NearsayError::ServerError);
             },
+            Ok(res) => res,
         };
         
         // insert user data into db
-        if let Err(mongo_err) = self.db.collection("users").insert_one(doc! {
-            "_id": id,
-            // no position field yet
-            "updated": current_time_ms() as i64,
-            
-            "username": username,
-            "avatar": avatar as i32,
-            "hash": serverhash,
-            "votes": {}
-        }).await {
-            eprintln!("mongodb error when adding new user: {}", &mongo_err);
-            return Err(NearsayError::ServerError);
+        match 
+            self.db.collection::<User>("users")
+            .update_one(
+                doc! { "_id": uid },
+                doc! {
+                    // no position field yet
+                    "updated": current_time_ms() as i64,
+                    
+                    "username": username,
+                    "avatar": avatar as i32,
+                    "hash": serverhash,
+                    "votes": {}
+                }
+            )
+            .upsert(true)
+            .await
+        {
+            Err(mongo_err) => {
+                eprintln!("mongodb error when adding new user: {}", &mongo_err);
+                Err(NearsayError::ServerError)
+            },
+            Ok(_) => Ok(())
+        }
+    }
+
+    pub async fn move_user(&self, uid: &str, new_pos: &[f64]) -> Result<(), ()> {
+
+        if let Err(mongo_err) = 
+            self.db.collection::<User>("users")
+            .update_one(
+                doc! { "_id": uid },
+                doc! { 
+                    "pos": new_pos,
+                    "updated": current_time_ms() as i64
+                }
+            )
+            .await
+        {
+            eprintln!("error moving user: {}", mongo_err);
+            return Err(());
         }
 
-
         Ok(())
     }
 
-    pub async fn move_user(&self, uid: &str, new_pos: &[f64]) -> Result<(), MongoError> {
+    async fn is_user(&self, uid: &str) -> bool {
+        match 
+            self.db.collection::<Document>("users")
+            .find_one(doc! { "_id": uid })
+            .await
+        {
+            Err(_) => false,
+            Ok(None) => false,
+            Ok(Some(document)) => document.contains_key("username"),
+        }
+    }
+
+    pub async fn sign_out(&self, uid: &str) -> Result<(), ()> {
         
-        let res = self.db.collection::<User>("users").update_one(
+        match self.is_user(uid).await {
+
+            // if its an anonymous session, delete it
+            false => self.delete("users", uid).await, 
+
+            // if its a user, remove the "pos" field
+            true => {
+                match 
+                    self.db.collection::<User>("users")
+                    .update_one(
+                        doc! { "_id": uid }, 
+                        doc! { "$unset": { "pos": "" } }
+                    )
+                    .await
+                {
+                    Err(mongo_err) => {
+                        eprintln!("mongodb error when signing out user and removing 'pos' field: {}", &mongo_err);
+                        Err(())
+                    },
+                    Ok(_) => Ok(()),
+                }
+            },
+        }
+        
+    }
+
+    pub async fn set_avatar(&self, uid: &str, new_avatar: usize) -> Result<(), ()> {
+        if let Err(mongo_err) = self.db.collection::<User>("users").update_one(
                 doc! { "_id": uid },
-                doc! { "pos": new_pos }
-            )
-            .upsert(true) //TODO: upsert?
-            .await;
+                doc! { 
+                    "avatar": new_avatar as i32,
+                    "updated": current_time_ms() as i64
+                }
+            ).await
+        {
+            eprintln!("error moving user: {}", mongo_err);
+            return Err(());
+        }
 
-        if let Err(mongo_err) = &res { eprintln!("error moving poi: {}", mongo_err); }
-        
         Ok(())
     }
+
 
     pub async fn insert_post(&self, author: &str, pos: &[f64], body: &str) -> Result<(String, i64), MongoError> {
         
@@ -268,7 +372,9 @@ impl NearsayDB {
         }   
     }
 
-    pub async fn get_pois<T: Send + Sync + POI + HasCollection<T>>(&self, within: &Rect<f64>, exclude: Option<&Rect<f64>>) -> Cursor<Document> {
+    pub async fn get_pois<T>(&self, collection: &str, within: &Rect<f64>, exclude: Option<&Rect<f64>>) -> Cursor<Document>
+    where T: Send + Sync + POI
+    {
 
         let query = match exclude {
             Some(exclude) => {
@@ -286,7 +392,7 @@ impl NearsayDB {
             }
         };
 
-        T::get_collection(&self.db)
+        self.db.collection::<T>(collection)
             .aggregate(vec! [
                 query,
                 T::get_poi_projection()
