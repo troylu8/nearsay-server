@@ -19,16 +19,19 @@ pub enum NearsayError {
     Unauthorized,
     UsernameTaken,
 }
+impl NearsayError {
+    pub fn to_status_code(self) -> u16 {
+        match self {
+            NearsayError::ServerError => 500,
+            NearsayError::UserNotFound => 404,
+            NearsayError::Unauthorized => 401,
+            NearsayError::UsernameTaken => 409,
+        }
+    }
+}
 impl IntoResponse for NearsayError {
     fn into_response(self) -> Response {
-        let status = match self {
-            NearsayError::ServerError => StatusCode::INTERNAL_SERVER_ERROR,
-            NearsayError::UserNotFound => StatusCode::NOT_FOUND,
-            NearsayError::Unauthorized => StatusCode::UNAUTHORIZED,
-            NearsayError::UsernameTaken => StatusCode::CONFLICT,
-        };
-
-        Response::builder().status(status).body(Body::empty()).unwrap()
+        Response::builder().status(self.to_status_code()).body(Body::empty()).unwrap()
     }
 }
 

@@ -2,14 +2,6 @@ use std::collections::BTreeMap;
 use mongodb::bson::{doc, Document};
 use serde::{Deserialize, Serialize};
 
-// #[derive(Serialize, Deserialize, Clone, Debug)]
-// pub struct POI {
-//     pub _id: String,
-//     pub pos: [f64; 2],
-//     pub variant: String,
-//     pub updated: u64,
-// }
-
 pub trait POI {
     fn get_poi_projection() -> Document;
 }
@@ -73,3 +65,44 @@ pub struct UserVotes {
     pub _id: String,
     pub votes: BTreeMap<String, String>
 }
+
+#[derive(Debug, PartialEq, Clone)]
+pub enum Vote { Like, Dislike, None }
+
+impl Vote {
+    /// number of days added/subtracted from post expiry as a result of this vote
+    pub fn as_lifetime_weight(&self) -> i32 {
+        match self {
+            Vote::Like => 2,
+            Vote::Dislike => -1,
+            Vote::None => 0,
+        }
+    }
+}
+
+impl From<String> for Vote {
+    fn from(value: String) -> Self {
+        match value.as_str() {
+            "like" => Vote::Like,
+            "dislike" => Vote::Dislike,
+            _ => Vote::None,
+        }
+    }
+}
+impl Into<String> for Vote {
+    fn into(self) -> String {
+        match self {
+            Vote::Like => "like".to_string(),
+            Vote::Dislike => "dislike".to_string(),
+            Vote::None => "none".to_string(),
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct Viewer {
+    pub pos: [f64; 2],
+    pub avatar: usize
+}
+
+pub enum UserType { User, Viewer }

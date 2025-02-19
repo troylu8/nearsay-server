@@ -1,15 +1,15 @@
 use std::collections::HashMap;
 
-use futures::{io::Cursor, TryStreamExt};
+use futures::TryStreamExt;
 use hmac::Hmac;
-use mongodb::bson::{doc, Document};
+use mongodb::bson::Document;
 use serde::{Deserialize, Serialize};
 use nearsay_server::clone_into_closure;
 use serde_json::{json, Value};
 use sha2::Sha256;
 use socketioxide::extract::{AckSender, Data, SocketRef};
 
-use crate::{area::{broadcast_at, update_rooms, BroadcastTargets, Rect, TileRegion}, auth::{authenticate_jwt, JWTPayload}, db::NearsayDB, types::{Post, User, POI}};
+use crate::{area::{Rect, TileRegion}, auth::{authenticate_jwt, create_jwt, verify_password, JWTPayload}, db::{gen_id, NearsayDB}, types::{Post, User, POI}};
 
 #[derive(Serialize, Deserialize, Debug)]
 struct ViewShiftedData {
@@ -42,13 +42,157 @@ struct NewPostData {
     body: String
 }
 
-struct StartSessionData {
-    jwt: Option<String>,
-    uid: Option<String>,
-    
+#[derive(Deserialize, Debug)]
+struct NewViewerData {
+    pos: [f64; 2],
+    avatar: usize,
+}
+
+#[derive(Deserialize, Debug)]
+struct SignInData {
+    username: String,
+    userhash: String,
+    pos: [f64; 2]
+}
+
+#[derive(Deserialize, Debug)]
+struct SignUpData {
+    username: String,
+    userhash: String,
+    avatar: usize
 }
 
 pub fn on_socket_connect(client_socket: SocketRef, db: &NearsayDB, key: &Hmac<Sha256>) {
+
+    client_socket.on(
+        "new-viewer",
+        clone_into_closure! {
+            (db, key)
+            |client_socket: SocketRef, Data(NewViewerData {pos, avatar}), ack: AckSender| async move {
+                let uid = gen_id();
+                let Ok(jwt) = create_jwt(&key, uid.clone()) else { return };
+                
+                if db.insert_viewer(&uid, avatar, &pos).await.is_ok() {
+                    broadcast_at(client_socket, pos, "user-joined", BroadcastTargets::ExcludingSelf, 
+                        &json! ({
+                            "uid": uid,
+                            "pos": pos,
+                            "avatar": avatar
+                        })
+                    );
+                    ack.send(&jwt).unwrap();
+                }
+                else { ack.send(&Value::Null).unwrap(); };
+
+            }
+        }
+    );
+
+    // for getting the jwt from username and password
+    client_socket.on(
+        "sign-in",
+        clone_into_closure! {
+            (db, key)
+            |client_socket: SocketRef, Data(SignInData{username, userhash, pos}), ack: AckSender| async move {
+                
+                // check if user exists
+                let user = match db.get_user(&username).await {
+                    Err(_) => return ack.send(&500).unwrap(),
+                    Ok(None) => return ack.send(&404).unwrap(),
+                    Ok(Some(user)) => user
+                };
+                
+                // verify password
+                match verify_password(&userhash, &user.hash[..]) {
+                    Err(_) => return ack.send(&500).unwrap(),
+                    Ok(false) => return ack.send(&401).unwrap(),
+                    Ok(true) => {},
+                }
+
+                // create jwt with this uid
+                let Ok(jwt) = create_jwt(&key, user._id.clone()) 
+                else { return ack.send(&500).unwrap() };
+
+                broadcast_at(client_socket, pos, "user-joined", BroadcastTargets::ExcludingSelf,
+                    &json! ({
+                        "uid": user._id,
+                        "pos": pos,
+                        "avatar": user.avatar
+                    })
+                );
+                ack.send(&jwt).unwrap()
+
+            }
+        
+        }
+    );
+
+    // for creating an account
+    client_socket.on(
+        "sign-up",
+        clone_into_closure! {
+            (db, key)
+            |client_socket: SocketRef, Data(SignUpData{username, userhash, avatar}), ack: AckSender| async move {
+                let uid = gen_id();
+    
+                let Ok(jwt) = create_jwt(&key, uid.clone()) else { return ack.send(&500).unwrap() };
+    
+                match db.insert_user(&uid, &username, &userhash, avatar).await {
+                    Err(err) => return ack.send(&err.to_status_code()).unwrap(),
+
+                    // an anonymous viewer was replaced
+                    Ok(Some(pos)) => {
+                        // tell everyone someone signed in
+                        broadcast_at(client_socket, pos, "user-joined", BroadcastTargets::ExcludingSelf, 
+                            &json!({
+                                "uid": uid,
+                                "username": username,
+                                "avatar": avatar
+                            })
+                        );
+                    }
+                    
+                    _ => {}
+                }
+
+                ack.send(&jwt).unwrap()
+            }
+        }
+    );
+
+    client_socket.on(
+        "sign-out",
+        clone_into_closure! {
+            (db, key)
+            |client_socket: SocketRef, jwt: Data<String>, ack: AckSender| async move {
+                
+                // get uid from jwt
+                let Ok(JWTPayload { uid }) = authenticate_jwt(&key, &jwt)
+                else { return ack.send(&500).unwrap() };
+
+                // get position of this user
+                let pos = match db.get::<Document>("users", &uid).await {
+                    Err(_) => return ack.send(&500).unwrap(),
+                    Ok(None) => return ack.send(&404).unwrap(),
+                    Ok(Some(user)) => {
+                        let pos = user.get("pos").expect("user has a 'pos' field").as_array().unwrap();
+                        [pos[0].as_f64().unwrap(), pos[1].as_f64().unwrap()]
+                    },
+                };
+
+                // sign out in db
+                if let Err(nearsay_err) = db.sign_out(&uid).await {
+                    return ack.send(&nearsay_err.to_status_code()).unwrap()
+                }
+
+                broadcast_at(client_socket, pos, "user-left", BroadcastTargets::ExcludingSelf,
+                    &json!( { "uid": uid } )
+                );
+
+                ack.send(&200).unwrap();
+            }
+        }
+    );
 
     client_socket.on(
         "view-shift",
@@ -89,10 +233,10 @@ pub fn on_socket_connect(client_socket: SocketRef, db: &NearsayDB, key: &Hmac<Sh
                 
                 if db.move_user(&moved_user_id, &move_data.pos).await.is_ok() {
                     broadcast_at(client_socket, move_data.pos, "someone-moved", BroadcastTargets::ExcludingSelf, 
-                        &doc! {
+                        &json! ({
                             "uid": moved_user_id,
                             "pos": &move_data.pos as &[f64]
-                        }
+                        })
                     );
                 }
             }
@@ -121,14 +265,14 @@ pub fn on_socket_connect(client_socket: SocketRef, db: &NearsayDB, key: &Hmac<Sh
                         else { format!("{}...", body[..BLURB_LENGTH].to_string()) };
 
                     broadcast_at(client_socket, pos, "new-poi", BroadcastTargets::IncludingSelf,
-                        & doc! {
+                        & json! ({
                             "_id": post_id.clone(),
                             "pos": &pos as &[f64],
                             "kind": "post",
                             "updated": ms_created,
             
                             "blurb": blurb,
-                        }
+                        })
                     );
                 }
             }
@@ -162,3 +306,74 @@ async fn add_pois_to_move_resp<T: Send + Sync + POI>(db: &NearsayDB, collection:
     None
 }
 
+
+#[derive(Debug)]
+pub enum BroadcastTargets { IncludingSelf, ExcludingSelf }
+
+pub fn broadcast_at<T: Sized + Serialize>(io: SocketRef, pos: [f64; 2], event: &str, targets: BroadcastTargets, data: &T) {
+    let [x, y] = pos;
+
+    let mut area = Rect {
+        left: -(TileRegion::BOUND as f64), 
+        right: TileRegion::BOUND as f64, 
+        top: TileRegion::BOUND as f64, 
+        bottom: -(TileRegion::BOUND as f64)
+    };
+
+    let broadcast = |room: String,| {
+        match targets {
+            BroadcastTargets::IncludingSelf => io.within(room.clone()),
+            BroadcastTargets::ExcludingSelf => io.to(room.clone()),
+        }.emit(event, data).unwrap();
+    };
+    
+    broadcast(get_room(0, area.left, area.bottom));
+    
+    for depth in 1..=23 {
+        
+        let mid_x = (area.left + area.right) / 2.0;
+        let mid_y = (area.top + area.bottom) / 2.0;
+        
+        if x >= mid_x { area.left = mid_x; }
+        else { area.right = mid_x; }
+        
+        if y >= mid_y { area.bottom = mid_y; }
+        else { area.top = mid_y; }
+
+        broadcast(get_room(depth, area.left, area.bottom));
+    }
+}
+
+
+const SPLIT: &str = " : ";
+
+pub fn update_rooms(client_socket: &SocketRef, tilereg: &TileRegion)  {
+
+    client_socket.leave_all().unwrap();
+
+    let tile_size = tilereg.get_tile_size();
+    let width = ((tilereg.area.right - tilereg.area.left) / tile_size).ceil() as usize;
+    let height = ((tilereg.area.top - tilereg.area.bottom) / tile_size).ceil() as usize;    
+    
+    for x in 0..width {
+        for y in 0..height {
+
+            let room = get_room(
+                tilereg.depth, 
+                tilereg.area.left + (x as f64 * tile_size), 
+                tilereg.area.bottom + (y as f64 * tile_size)
+            );
+
+            // join this room 
+            client_socket.join(room).unwrap();
+        }
+    }
+}
+
+fn get_room(depth: usize, left: f64, bottom: f64) -> String {
+    format!("{}{}{}{}{}", depth, SPLIT, to_5_decimals(left), SPLIT, to_5_decimals(bottom))
+}
+
+fn to_5_decimals(x: f64) -> f64 {
+    (x * 100000.0).round() / 100000.0
+}

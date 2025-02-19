@@ -14,7 +14,7 @@ pub struct JWTPayload {
 }
 
 
-pub fn get_auth_key() -> Hmac<Sha256> {
+pub fn get_jwt_secret() -> Hmac<Sha256> {
     Hmac::new_from_slice(env::var("JWT_SECRET").unwrap().as_bytes()).unwrap()
 }
 
@@ -30,7 +30,17 @@ pub fn create_jwt(key: &Hmac<Sha256>, uid: String) -> Result<String, ()> {
             Err(())
         },
     }
+}
 
+
+pub fn verify_password(password: &str, hash: &str) -> Result<bool, ()> {
+    match bcrypt::verify(password, hash) {
+        Err(bcrypt_err) => {
+            eprintln!("bcrypt error when authorizing user: {}", bcrypt_err);
+            Err(())
+        },
+        Ok(verified) => Ok(verified)
+    }
 }
 
 

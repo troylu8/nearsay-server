@@ -21,9 +21,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let db = NearsayDB::new().await;
     let (socketio_layer, io) = SocketIo::new_layer();
 
-    // delete_old::begin(db.db.clone());
-
-    let key = auth::get_auth_key();
+    let key = auth::get_jwt_secret();
 
     io.ns("/", clone_into_closure! { 
         (db, key) 

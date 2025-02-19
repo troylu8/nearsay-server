@@ -1,5 +1,4 @@
 
-use std::time::{Instant, SystemTime};
 use bcrypt::{hash, DEFAULT_COST};
 use mongodb::{ 
     bson::{bson, doc, Document}, error::Error as MongoError, options::Hint, results::UpdateResult, Client, Cursor, Database
@@ -7,40 +6,9 @@ use mongodb::{
 use nearsay_server::{current_time_ms, NearsayError};
 use serde::{de::DeserializeOwned, Deserialize};
 
-use crate::{area::Rect, delete_old::today, types::{Post, User, UserVotes, POI}};
+use crate::{area::Rect, delete_old::today, types::{Post, Viewer, User, UserType, UserVotes, Vote, POI}};
 
-#[derive(Debug, PartialEq, Clone)]
-pub enum Vote { Like, Dislike, None }
 
-impl Vote {
-    /// number of days added/subtracted from post expiry as a result of this vote
-    fn as_lifetime_weight(&self) -> i32 {
-        match self {
-            Vote::Like => 2,
-            Vote::Dislike => -1,
-            Vote::None => 0,
-        }
-    }
-}
-
-impl From<String> for Vote {
-    fn from(value: String) -> Self {
-        match value.as_str() {
-            "like" => Vote::Like,
-            "dislike" => Vote::Dislike,
-            _ => Vote::None,
-        }
-    }
-}
-impl Into<String> for Vote {
-    fn into(self) -> String {
-        match self {
-            Vote::Like => "like".to_string(),
-            Vote::Dislike => "dislike".to_string(),
-            Vote::None => "none".to_string(),
-        }
-    }
-}
 
 #[derive(Clone)]
 pub struct NearsayDB {
@@ -101,22 +69,24 @@ impl NearsayDB {
         //TODO: test if votes are included in return obj
     }
 
-    pub async fn insert_anon_session(&self, uid: &str, avatar: usize, pos: &[f64]) -> Result<(), ()> {
+    pub async fn insert_viewer(&self, uid: &str, avatar: usize, pos: &[f64]) -> Result<(), ()> {
         if let Err(mongo_err) = self.db.collection("users").insert_one(doc! {
             "_id": uid,
             "pos": pos,
             "avatar": avatar as i32,
             "updated": current_time_ms() as i64,
         }).await {
-            eprintln!("mongodb error when starting anonymous session: {}", &mongo_err);
+            eprintln!("mongodb error when starting anonymous viewer: {}", &mongo_err);
             return Err(())
         }
 
         Ok(())
     }
 
-    /// will replace anonymous sessions, but not preexisting users
-    pub async fn insert_user(&self, uid: &str, username: &str, userhash: &str, avatar: usize) -> Result<(), NearsayError> {
+    /// will replace anonymous viewers, but not preexisting users
+    /// 
+    /// returns `Ok(position of anonymous viewer)` if an anonymous viewer was replaced
+    pub async fn insert_user(&self, uid: &str, username: &str, userhash: &str, avatar: usize) -> Result<Option<[f64; 2]>, NearsayError> {
 
         // check if username is taken
         match
@@ -163,13 +133,26 @@ impl NearsayDB {
                 eprintln!("mongodb error when adding new user: {}", &mongo_err);
                 Err(NearsayError::ServerError)
             },
-            Ok(_) => Ok(())
+            Ok(UpdateResult {upserted_id, ..}) => {
+                match upserted_id {
+                    None => Ok(None),
+                    Some(viewer_id) => {
+                        let viewer_id = viewer_id.as_str().expect("upserted id should be a str");
+
+                        let Ok(Some(viewer)) = 
+                            self.get::<Viewer>("users", viewer_id).await
+                            else { return Err(NearsayError::ServerError) };
+
+                        Ok(Some(viewer.pos))
+                    },
+                }
+            }
         }
     }
 
     pub async fn move_user(&self, uid: &str, new_pos: &[f64]) -> Result<(), ()> {
 
-        if let Err(mongo_err) = 
+        match
             self.db.collection::<User>("users")
             .update_one(
                 doc! { "_id": uid },
@@ -180,34 +163,40 @@ impl NearsayDB {
             )
             .await
         {
-            eprintln!("error moving user: {}", mongo_err);
-            return Err(());
+            Err(mongo_err) => {
+                eprintln!("error moving user: {}", mongo_err);
+                Err(())
+            },
+            Ok(_) => Ok(()),
         }
-
-        Ok(())
     }
 
-    async fn is_user(&self, uid: &str) -> bool {
+    async fn get_user_type(&self, uid: &str) -> Result<Option<UserType>, ()> {
         match 
             self.db.collection::<Document>("users")
             .find_one(doc! { "_id": uid })
             .await
         {
-            Err(_) => false,
-            Ok(None) => false,
-            Ok(Some(document)) => document.contains_key("username"),
+            Err(mongo_err) => {
+                eprintln!("error getting user type: {}", mongo_err);
+                Err(())
+            },
+            Ok(None) => Ok(None),
+            Ok(Some(document)) => match document.contains_key("username") {
+                true => Ok(Some(UserType::User)),
+                false => Ok(Some(UserType::Viewer)),
+            },
         }
     }
 
-    pub async fn sign_out(&self, uid: &str) -> Result<(), ()> {
-        
-        match self.is_user(uid).await {
-
-            // if its an anonymous session, delete it
-            false => self.delete("users", uid).await, 
-
-            // if its a user, remove the "pos" field
-            true => {
+    pub async fn sign_out(&self, uid: &str) -> Result<(), NearsayError> {
+        match self.get_user_type(uid).await {
+            Err(_) => Err(NearsayError::ServerError),
+            Ok(None) => Err(NearsayError::UserNotFound),
+            Ok(Some(UserType::Viewer)) => {
+                self.delete("users", uid).await.map_err(|_| NearsayError::ServerError)
+            },
+            Ok(Some(UserType::User)) => {
                 match 
                     self.db.collection::<User>("users")
                     .update_one(
@@ -218,7 +207,7 @@ impl NearsayDB {
                 {
                     Err(mongo_err) => {
                         eprintln!("mongodb error when signing out user and removing 'pos' field: {}", &mongo_err);
-                        Err(())
+                        Err(NearsayError::ServerError)
                     },
                     Ok(_) => Ok(()),
                 }

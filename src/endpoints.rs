@@ -28,90 +28,14 @@ fn empty_response(status: u16) -> Response<Body> {
         .unwrap()
 }
 
-#[derive(Deserialize, Debug)]
-struct SignUpData {
-    username: String,
-    userhash: String,
-    avatar: usize
-}
 
-#[derive(Deserialize, Debug)]
-struct SignInData {
-    username: String,
-    userhash: String,
-}
 
-#[derive(Deserialize, Debug)]
-struct StartAnonSession {
-    avatar: usize,
-    pos: [f64; 2]
-}
+
+
 
 
 pub fn get_endpoints_router(db: &NearsayDB, key: &Hmac<Sha256>) -> axum::Router {
     axum::Router::new()
-
-        .route("/start-anon-session", post(
-            clone_into_closure! {
-                (db, key)
-                |Json(StartAnonSession{ avatar, pos })| async move {
-                    let uid = gen_id();
-                    let Ok(jwt) = create_jwt(&key, uid.clone()) else { return empty_response(500) };
-                    match db.insert_anon_session(&uid, avatar, &pos).await {
-                        Err(err) => err.into_response(),
-                        Ok(()) => jwt.into_response(),
-                    }
-                }
-            }
-        ))
-    
-        // for creating an account
-        .route("/sign-up", post(
-            clone_into_closure! {
-                (db, key)
-                |Json(SignUpData{username, userhash, avatar})| async move {
-                    let uid = gen_id();
-
-                    let Ok(jwt) = create_jwt(&key, uid.clone()) else { return empty_response(500) };
-
-                    match db.insert_user(&uid, &username, &userhash, avatar).await {
-                        Err(err) => err.into_response(),
-                        Ok(()) => jwt.into_response(),
-                    }
-                }
-            }
-        ))
-
-        // for getting the jwt from username and password
-        .route("/sign-in", post(
-            clone_into_closure!{
-                (db, key)
-                |Json(SignInData{username, userhash})| async move {
-                    match db.get_user(&username).await {
-                        Err(_) => Err(NearsayError::ServerError),
-                        Ok(None) => Err(NearsayError::UserNotFound),
-                        
-                        Ok(Some(user)) => {
-                            
-                            match bcrypt::verify(userhash, &user.hash[..]) {
-                                Err(bcrypt_err) => {
-                                    eprintln!("bcrypt error when authorizing user: {}", bcrypt_err);
-                                    Err(NearsayError::ServerError)
-                                },
-                                Ok(verified) => match verified {
-                                    true => match create_jwt(&key, user._id) {
-                                        Ok(jwt) => Ok(jwt),
-                                        Err(_) => Err(NearsayError::ServerError),
-                                    },
-                                    false => Err(NearsayError::Unauthorized),
-                                },
-                            }
-                        }
-                    }
-                }
-            }
-        ))
-
 
         .route("/vote/{post_id}", post(
             clone_into_closure! {
