@@ -99,10 +99,10 @@ impl Into<String> for Vote {
     }
 }
 
-#[derive(Debug, Deserialize)]
-pub struct Viewer {
+#[derive(Deserialize, Debug)]
+pub struct Guest {
     pub pos: [f64; 2],
     pub avatar: usize
 }
 
-pub enum UserType { User, Viewer }
+pub enum UserType { User, Guest }

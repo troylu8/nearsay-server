@@ -1,4 +1,3 @@
-use std::env;
 use db::NearsayDB;
 use endpoints::get_endpoints_router;
 use socket::on_socket_connect;

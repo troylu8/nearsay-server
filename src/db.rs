@@ -6,7 +6,7 @@ use mongodb::{
 use nearsay_server::{current_time_ms, NearsayError};
 use serde::{de::DeserializeOwned, Deserialize};
 
-use crate::{area::Rect, delete_old::today, types::{Post, Viewer, User, UserType, UserVotes, Vote, POI}};
+use crate::{area::Rect, delete_old::today, types::{Post, Guest, User, UserType, UserVotes, Vote, POI}};
 
 
 
@@ -69,23 +69,23 @@ impl NearsayDB {
         //TODO: test if votes are included in return obj
     }
 
-    pub async fn insert_viewer(&self, uid: &str, avatar: usize, pos: &[f64]) -> Result<(), ()> {
+    pub async fn insert_guest(&self, uid: &str, avatar: usize, pos: &[f64]) -> Result<(), ()> {
         if let Err(mongo_err) = self.db.collection("users").insert_one(doc! {
             "_id": uid,
             "pos": pos,
             "avatar": avatar as i32,
             "updated": current_time_ms() as i64,
         }).await {
-            eprintln!("mongodb error when starting anonymous viewer: {}", &mongo_err);
+            eprintln!("mongodb error when starting  guest: {}", &mongo_err);
             return Err(())
         }
 
         Ok(())
     }
 
-    /// will replace anonymous viewers, but not preexisting users
+    /// will replace guests, but not preexisting users
     /// 
-    /// returns `Ok(position of anonymous viewer)` if an anonymous viewer was replaced
+    /// returns `Ok(position of guest)` if a guest was replaced
     pub async fn insert_user(&self, uid: &str, username: &str, userhash: &str, avatar: usize) -> Result<Option<[f64; 2]>, NearsayError> {
 
         // check if username is taken
@@ -103,7 +103,7 @@ impl NearsayDB {
         }
 
         // hash password (again) to store in db
-        let serverhash = match hash(userhash, DEFAULT_COST) {
+        let userhash = match hash(userhash, DEFAULT_COST) {
             Err(bcrypt_err) => {
                 eprintln!("bcrypt error when hashing userhash: {}", &bcrypt_err);
                 return Err(NearsayError::ServerError);
@@ -117,13 +117,15 @@ impl NearsayDB {
             .update_one(
                 doc! { "_id": uid },
                 doc! {
-                    // no position field yet
-                    "updated": current_time_ms() as i64,
-                    
-                    "username": username,
-                    "avatar": avatar as i32,
-                    "hash": serverhash,
-                    "votes": {}
+                    "$set": {
+                        // no position field yet
+                        "updated": current_time_ms() as i64,
+                        
+                        "username": username,
+                        "avatar": avatar as i32,
+                        "hash": userhash,
+                        "votes": {}
+                    }
                 }
             )
             .upsert(true)
@@ -133,38 +135,42 @@ impl NearsayDB {
                 eprintln!("mongodb error when adding new user: {}", &mongo_err);
                 Err(NearsayError::ServerError)
             },
-            Ok(UpdateResult {upserted_id, ..}) => {
+            Ok(UpdateResult {upserted_id, modified_count, ..}) => {
+                if modified_count == 0 { return Ok(None) };
+
                 match upserted_id {
                     None => Ok(None),
-                    Some(viewer_id) => {
-                        let viewer_id = viewer_id.as_str().expect("upserted id should be a str");
+                    Some(guest_id) => {
+                        let guest_id = guest_id.as_str().expect("upserted id should be a str");
 
-                        let Ok(Some(viewer)) = 
-                            self.get::<Viewer>("users", viewer_id).await
+                        let Ok(Some(guest)) = 
+                            self.get::<Guest>("users", guest_id).await
                             else { return Err(NearsayError::ServerError) };
 
-                        Ok(Some(viewer.pos))
+                        Ok(Some(guest.pos))
                     },
                 }
             }
         }
     }
 
-    pub async fn move_user(&self, uid: &str, new_pos: &[f64]) -> Result<(), ()> {
+    pub async fn set_user_pos(&self, uid: &str, new_pos: &[f64]) -> Result<(), ()> {
+        self.update_user(uid, &mut doc! { "pos": &new_pos as &[f64] }).await
+    }
+
+    pub async fn update_user(&self, uid: &str, update: &mut Document) -> Result<(), ()> {
+        update.insert("updated", current_time_ms() as i64);
 
         match
             self.db.collection::<User>("users")
             .update_one(
                 doc! { "_id": uid },
-                doc! { 
-                    "pos": new_pos,
-                    "updated": current_time_ms() as i64
-                }
+                doc! { "$set": update }
             )
             .await
         {
             Err(mongo_err) => {
-                eprintln!("error moving user: {}", mongo_err);
+                eprintln!("error updating user: {}", mongo_err);
                 Err(())
             },
             Ok(_) => Ok(()),
@@ -184,7 +190,7 @@ impl NearsayDB {
             Ok(None) => Ok(None),
             Ok(Some(document)) => match document.contains_key("username") {
                 true => Ok(Some(UserType::User)),
-                false => Ok(Some(UserType::Viewer)),
+                false => Ok(Some(UserType::Guest)),
             },
         }
     }
@@ -193,7 +199,7 @@ impl NearsayDB {
         match self.get_user_type(uid).await {
             Err(_) => Err(NearsayError::ServerError),
             Ok(None) => Err(NearsayError::UserNotFound),
-            Ok(Some(UserType::Viewer)) => {
+            Ok(Some(UserType::Guest)) => {
                 self.delete("users", uid).await.map_err(|_| NearsayError::ServerError)
             },
             Ok(Some(UserType::User)) => {
@@ -220,8 +226,10 @@ impl NearsayDB {
         if let Err(mongo_err) = self.db.collection::<User>("users").update_one(
                 doc! { "_id": uid },
                 doc! { 
-                    "avatar": new_avatar as i32,
-                    "updated": current_time_ms() as i64
+                    "$set": {
+                        "avatar": new_avatar as i32,
+                        "updated": current_time_ms() as i64
+                    }
                 }
             ).await
         {

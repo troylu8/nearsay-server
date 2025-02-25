@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use futures::TryStreamExt;
 use hmac::Hmac;
-use mongodb::bson::Document;
+use mongodb::bson::{doc, Document};
 use serde::{Deserialize, Serialize};
 use nearsay_server::clone_into_closure;
 use serde_json::{json, Value};
@@ -30,8 +30,7 @@ struct ViewShiftedResponse {
 
 #[derive(Serialize, Deserialize, Debug)]
 struct MoveData {
-    jwt: Option<String>,
-    uid: Option<String>,
+    jwt: String,
     pos: [f64; 2],
 }
 
@@ -43,7 +42,7 @@ struct NewPostData {
 }
 
 #[derive(Deserialize, Debug)]
-struct NewViewerData {
+struct NewGuestData {
     pos: [f64; 2],
     avatar: usize,
 }
@@ -57,36 +56,55 @@ struct SignInData {
 
 #[derive(Deserialize, Debug)]
 struct SignUpData {
+    guest_jwt: Option<String>,
     username: String,
     userhash: String,
     avatar: usize
 }
 
+#[derive(Deserialize, Debug)]
+struct StartSessionData {
+    jwt: String,
+    pos: [f64; 2]
+}
+
+#[derive(Deserialize, Debug)]
+struct SignOutData {
+    jwt: String,
+    stay_online: bool
+}
+
+#[derive(Deserialize, Debug)]
+struct EditUserData {
+    jwt: String,
+    update: Document
+}
+
 pub fn on_socket_connect(client_socket: SocketRef, db: &NearsayDB, key: &Hmac<Sha256>) {
 
-    client_socket.on(
-        "new-viewer",
-        clone_into_closure! {
-            (db, key)
-            |client_socket: SocketRef, Data(NewViewerData {pos, avatar}), ack: AckSender| async move {
-                let uid = gen_id();
-                let Ok(jwt) = create_jwt(&key, uid.clone()) else { return };
-                
-                if db.insert_viewer(&uid, avatar, &pos).await.is_ok() {
-                    broadcast_at(client_socket, pos, "user-joined", BroadcastTargets::ExcludingSelf, 
-                        &json! ({
-                            "uid": uid,
-                            "pos": pos,
-                            "avatar": avatar
-                        })
-                    );
-                    ack.send(&jwt).unwrap();
-                }
-                else { ack.send(&Value::Null).unwrap(); };
-
-            }
+    async fn create_guest(db: &NearsayDB, key: &Hmac<Sha256>, client_socket: SocketRef, Data(NewGuestData {pos, avatar}): Data<NewGuestData>, ack: AckSender) {
+        let uid = gen_id();
+        let Ok(jwt) = create_jwt(&key, uid.clone()) else { return ack.send(&500).unwrap(); };
+        
+        if db.insert_guest(&uid, avatar, &pos).await.is_ok() {
+            broadcast_at(&client_socket, pos, "user-joined", BroadcastTargets::ExcludingSelf, 
+                &json! ({
+                    "uid": uid,
+                    "pos": pos,
+                    "avatar": avatar
+                })
+            );
+            ack.send(&jwt).unwrap();
         }
-    );
+        else { ack.send(&500).unwrap(); };
+    }
+
+    client_socket.on("sign-in-guest", clone_into_closure! {
+        (db, key)
+        |client_socket: SocketRef, new_guest_data: Data<NewGuestData>, ack: AckSender| async move {
+            create_guest(&db, &key, client_socket, new_guest_data, ack).await;
+        }
+    });
 
     // for getting the jwt from username and password
     client_socket.on(
@@ -113,14 +131,23 @@ pub fn on_socket_connect(client_socket: SocketRef, db: &NearsayDB, key: &Hmac<Sh
                 let Ok(jwt) = create_jwt(&key, user._id.clone()) 
                 else { return ack.send(&500).unwrap() };
 
-                broadcast_at(client_socket, pos, "user-joined", BroadcastTargets::ExcludingSelf,
+                if let Err(()) = db.set_user_pos(&user._id.clone(), &pos).await {
+                    return ack.send(&500).unwrap()
+                }
+
+                broadcast_at(&client_socket, pos, "user-joined", BroadcastTargets::ExcludingSelf,
                     &json! ({
                         "uid": user._id,
                         "pos": pos,
                         "avatar": user.avatar
                     })
                 );
-                ack.send(&jwt).unwrap()
+                ack.send(
+                    &json!({
+                        "jwt": jwt,
+                        "avatar": user.avatar
+                    })
+                ).unwrap()
 
             }
         
@@ -132,18 +159,30 @@ pub fn on_socket_connect(client_socket: SocketRef, db: &NearsayDB, key: &Hmac<Sh
         "sign-up",
         clone_into_closure! {
             (db, key)
-            |client_socket: SocketRef, Data(SignUpData{username, userhash, avatar}), ack: AckSender| async move {
-                let uid = gen_id();
-    
-                let Ok(jwt) = create_jwt(&key, uid.clone()) else { return ack.send(&500).unwrap() };
-    
+            |client_socket: SocketRef, Data(SignUpData{guest_jwt, username, userhash, avatar}), ack: AckSender| async move {
+                
+                // extract the uid from the guest jwt, or make a new one
+                let (uid, jwt) = match guest_jwt {
+                    Some(guest_jwt) => {
+                        let Ok(JWTPayload{uid}) = authenticate_jwt(&key, &guest_jwt)
+                        else { return ack.send(&401).unwrap() };
+                        (uid, guest_jwt)
+                    }
+                    None => {
+                        let uid = gen_id();
+                        let Ok(jwt) = create_jwt(&key, uid.clone())
+                        else { return ack.send(&500).unwrap() };
+                        (uid, jwt)
+                    }
+                };
+                
                 match db.insert_user(&uid, &username, &userhash, avatar).await {
                     Err(err) => return ack.send(&err.to_status_code()).unwrap(),
 
-                    // an anonymous viewer was replaced
+                    // a guest was replaced
                     Ok(Some(pos)) => {
                         // tell everyone someone signed in
-                        broadcast_at(client_socket, pos, "user-joined", BroadcastTargets::ExcludingSelf, 
+                        broadcast_at(&client_socket, pos, "user-joined", BroadcastTargets::ExcludingSelf, 
                             &json!({
                                 "uid": uid,
                                 "username": username,
@@ -161,22 +200,51 @@ pub fn on_socket_connect(client_socket: SocketRef, db: &NearsayDB, key: &Hmac<Sh
     );
 
     client_socket.on(
+        "start-session",
+        clone_into_closure! {
+            (db, key)
+            |client_socket: SocketRef, Data(StartSessionData{ jwt, pos }), ack: AckSender| async move {
+                let Ok(JWTPayload{uid}) = authenticate_jwt(&key, &jwt)
+                else { return ack.send(&401).unwrap() };
+
+                match db.set_user_pos(&uid, &pos).await {
+                    Err(()) => ack.send(&500).unwrap(),
+                    Ok(()) => {
+                        broadcast_at(&client_socket, pos, "user-joined", BroadcastTargets::ExcludingSelf, 
+                            &json!({
+                                "uid": uid,
+                                "pos": &pos as &[f64]
+                            })
+                        );
+                        
+                        ack.send(&()).unwrap()
+                    },
+                }
+            }
+        }
+    );
+
+    client_socket.on(
         "sign-out",
         clone_into_closure! {
             (db, key)
-            |client_socket: SocketRef, jwt: Data<String>, ack: AckSender| async move {
-                
+            |client_socket: SocketRef, Data(SignOutData{jwt, stay_online}), ack: AckSender| async move {
+
                 // get uid from jwt
                 let Ok(JWTPayload { uid }) = authenticate_jwt(&key, &jwt)
                 else { return ack.send(&500).unwrap() };
 
-                // get position of this user
-                let pos = match db.get::<Document>("users", &uid).await {
+                // get position and avatar of this user
+                let (pos, avatar) = match db.get::<Document>("users", &uid).await {
                     Err(_) => return ack.send(&500).unwrap(),
                     Ok(None) => return ack.send(&404).unwrap(),
                     Ok(Some(user)) => {
-                        let pos = user.get("pos").expect("user has a 'pos' field").as_array().unwrap();
-                        [pos[0].as_f64().unwrap(), pos[1].as_f64().unwrap()]
+                        let pos = user.get("pos").expect("user should have a 'pos' field").as_array().unwrap();
+                        let avatar = user.get("avatar").expect("user should have a 'avatar' field").as_i32().unwrap();
+                        (
+                            [pos[0].as_f64().unwrap(), pos[1].as_f64().unwrap()],
+                            avatar as usize
+                        )
                     },
                 };
 
@@ -185,11 +253,20 @@ pub fn on_socket_connect(client_socket: SocketRef, db: &NearsayDB, key: &Hmac<Sh
                     return ack.send(&nearsay_err.to_status_code()).unwrap()
                 }
 
-                broadcast_at(client_socket, pos, "user-left", BroadcastTargets::ExcludingSelf,
+                broadcast_at(&client_socket, pos, "user-left", BroadcastTargets::ExcludingSelf,
                     &json!( { "uid": uid } )
                 );
 
-                ack.send(&200).unwrap();
+                
+
+                if stay_online {
+                    Data(NewGuestData {pos, avatar});
+                    create_guest(&db, &key, client_socket, Data(NewGuestData {pos, avatar}), ack).await;
+                }
+                else {
+                    ack.send(&()).unwrap();
+                }
+
             }
         }
     );
@@ -218,26 +295,35 @@ pub fn on_socket_connect(client_socket: SocketRef, db: &NearsayDB, key: &Hmac<Sh
         "move",
         clone_into_closure! {
             (db, key)
-            |client_socket: SocketRef, Data(move_data): Data<MoveData>| async move {
+            |client_socket: SocketRef, Data(MoveData {jwt, pos})| async move {
+                let Ok(JWTPayload {uid, ..}) = authenticate_jwt(&key, &jwt) else { return };
 
-                let moved_user_id;
-
-                if let Some(jwt) = move_data.jwt {
-                    let Ok(JWTPayload {uid, ..}) = authenticate_jwt(&key, &jwt) else { return };
-                    moved_user_id = uid;
-                }
-                else if let Some(uid) = move_data.uid {
-                    moved_user_id = uid;
-                } 
-                else { return }
-                
-                if db.move_user(&moved_user_id, &move_data.pos).await.is_ok() {
-                    broadcast_at(client_socket, move_data.pos, "someone-moved", BroadcastTargets::ExcludingSelf, 
-                        &json! ({
-                            "uid": moved_user_id,
-                            "pos": &move_data.pos as &[f64]
+                if db.set_user_pos(&uid, &pos).await.is_ok() {
+                    broadcast_at(&client_socket, pos, "user-updated", BroadcastTargets::ExcludingSelf, 
+                        &json!({
+                            "uid": uid,
+                            "pos": &pos as &[f64]
                         })
                     );
+                }
+            }
+        }
+    );
+
+    client_socket.on(
+        "update-user",
+        clone_into_closure! {
+            (db, key)
+            |client_socket: SocketRef, Data( EditUserData{ jwt, mut update })| async move {
+                let Ok(JWTPayload {uid, ..}) = authenticate_jwt(&key, &jwt) else { return };
+
+                if db.update_user(&uid, &mut update).await.is_ok() {
+
+                    let Ok(Some(user)) = db.get::<User>("users", &uid).await else { return };
+                    let Some(pos) = user.pos else { return };
+
+                    update.insert("uid", uid);
+                    broadcast_at(&client_socket, pos, "user-updated", BroadcastTargets::ExcludingSelf, &update);
                 }
             }
         }
@@ -249,7 +335,7 @@ pub fn on_socket_connect(client_socket: SocketRef, db: &NearsayDB, key: &Hmac<Sh
             (db, key)
             |client_socket: SocketRef, Data(NewPostData {jwt, pos, body})| async move {
                 let author = match jwt {
-                    None => "anonymous".to_string(),
+                    None => "[anonymous]".to_string(),
                     Some(jwt) => match authenticate_jwt(&key, &jwt) {
                         Err(()) => return,
                         Ok(JWTPayload {uid, ..}) => uid
@@ -264,7 +350,7 @@ pub fn on_socket_connect(client_socket: SocketRef, db: &NearsayDB, key: &Hmac<Sh
                         if body.len() <= BLURB_LENGTH { body } 
                         else { format!("{}...", body[..BLURB_LENGTH].to_string()) };
 
-                    broadcast_at(client_socket, pos, "new-poi", BroadcastTargets::IncludingSelf,
+                    broadcast_at(&client_socket, pos, "new-poi", BroadcastTargets::IncludingSelf,
                         & json! ({
                             "_id": post_id.clone(),
                             "pos": &pos as &[f64],
@@ -310,7 +396,7 @@ async fn add_pois_to_move_resp<T: Send + Sync + POI>(db: &NearsayDB, collection:
 #[derive(Debug)]
 pub enum BroadcastTargets { IncludingSelf, ExcludingSelf }
 
-pub fn broadcast_at<T: Sized + Serialize>(io: SocketRef, pos: [f64; 2], event: &str, targets: BroadcastTargets, data: &T) {
+pub fn broadcast_at<T: Sized + Serialize>(io: &SocketRef, pos: [f64; 2], event: &str, targets: BroadcastTargets, data: &T) {
     let [x, y] = pos;
 
     let mut area = Rect {

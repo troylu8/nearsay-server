@@ -1,6 +1,6 @@
 use std::time::SystemTime;
 
-use axum::{body::Body, http::StatusCode, response::{IntoResponse, Response}};
+use axum::{body::Body, response::{IntoResponse, Response}};
 
 
 #[macro_export]

@@ -29,11 +29,6 @@ fn empty_response(status: u16) -> Response<Body> {
 }
 
 
-
-
-
-
-
 pub fn get_endpoints_router(db: &NearsayDB, key: &Hmac<Sha256>) -> axum::Router {
     axum::Router::new()
 
@@ -73,7 +68,7 @@ pub fn get_endpoints_router(db: &NearsayDB, key: &Hmac<Sha256>) -> axum::Router 
                             // add author name to response
                             let author_name = match db.get::<User>("users", &post.author).await {
                                 Ok(Some(user)) => user.username,
-                                _ => "anonymous".to_string()
+                                _ => "".to_string()
                             };
                             let mut post = json!(post);
                             post.as_object_mut().unwrap().insert("author_name".to_string(), Value::String(author_name));
