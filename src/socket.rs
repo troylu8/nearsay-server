@@ -5,7 +5,7 @@ use hmac::Hmac;
 use mongodb::bson::{doc, Document};
 use serde::{Deserialize, Serialize};
 use nearsay_server::clone_into_closure;
-use serde_json::{json, Value};
+use serde_json::json;
 use sha2::Sha256;
 use socketioxide::extract::{AckSender, Data, SocketRef};
 
@@ -311,20 +311,29 @@ pub fn on_socket_connect(client_socket: SocketRef, db: &NearsayDB, key: &Hmac<Sh
     );
 
     client_socket.on(
-        "update-user",
+        "edit-user",
         clone_into_closure! {
             (db, key)
-            |client_socket: SocketRef, Data( EditUserData{ jwt, mut update })| async move {
+            |client_socket: SocketRef, Data( EditUserData{ jwt, mut update }), ack: AckSender| async move {
                 let Ok(JWTPayload {uid, ..}) = authenticate_jwt(&key, &jwt) else { return };
 
-                if db.update_user(&uid, &mut update).await.is_ok() {
+                update.remove("_id");
+                update.remove("pos");
 
-                    let Ok(Some(user)) = db.get::<User>("users", &uid).await else { return };
-                    let Some(pos) = user.pos else { return };
-
-                    update.insert("uid", uid);
-                    broadcast_at(&client_socket, pos, "user-updated", BroadcastTargets::ExcludingSelf, &update);
+                if let Err(nearsay_err) = db.update_user(&uid, &mut update).await {
+                    return ack.send(&nearsay_err.to_status_code()).unwrap();
                 }
+
+                let Ok(Some(user)) = db.get::<User>("users", &uid).await 
+                else { return ack.send(&404).unwrap() };
+
+                if let Some(pos) = user.pos {
+                    update.insert("uid", uid);
+                    broadcast_at(&client_socket, pos, "user-edited", BroadcastTargets::ExcludingSelf, &update);
+                }
+
+                ack.send(&()).unwrap()
+                
             }
         }
     );

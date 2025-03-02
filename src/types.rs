@@ -1,5 +1,5 @@
 use std::collections::BTreeMap;
-use mongodb::bson::{doc, Document};
+use mongodb::bson::{doc, oid::ObjectId, Document};
 use serde::{Deserialize, Serialize};
 
 pub trait POI {
@@ -60,45 +60,6 @@ impl POI for User {
     }
 }
 
-#[derive(Deserialize)]
-pub struct UserVotes {
-    pub _id: String,
-    pub votes: BTreeMap<String, String>
-}
-
-#[derive(Debug, PartialEq, Clone)]
-pub enum Vote { Like, Dislike, None }
-
-impl Vote {
-    /// number of days added/subtracted from post expiry as a result of this vote
-    pub fn as_lifetime_weight(&self) -> i32 {
-        match self {
-            Vote::Like => 2,
-            Vote::Dislike => -1,
-            Vote::None => 0,
-        }
-    }
-}
-
-impl From<String> for Vote {
-    fn from(value: String) -> Self {
-        match value.as_str() {
-            "like" => Vote::Like,
-            "dislike" => Vote::Dislike,
-            _ => Vote::None,
-        }
-    }
-}
-impl Into<String> for Vote {
-    fn into(self) -> String {
-        match self {
-            Vote::Like => "like".to_string(),
-            Vote::Dislike => "dislike".to_string(),
-            Vote::None => "none".to_string(),
-        }
-    }
-}
-
 #[derive(Deserialize, Debug)]
 pub struct Guest {
     pub pos: [f64; 2],
@@ -106,3 +67,52 @@ pub struct Guest {
 }
 
 pub enum UserType { User, Guest }
+
+
+
+#[derive(Debug, PartialEq, Clone)]
+pub struct Vote {
+    pub post_id: String,
+    pub uid: String,
+    pub kind: VoteKind
+}
+
+impl From<Document> for Vote {
+    fn from(document: Document) -> Self {
+        Self {
+            post_id: document.get_str("post_id").unwrap().to_string(),   // rename _id -> post_id
+            uid: document.get_str("uid").unwrap().to_string(),
+            kind: VoteKind::from_str(document.get_str("kind").unwrap()),             // convert to `VoteKind`
+        }
+    }
+}
+
+#[derive(Debug, PartialEq, Clone)]
+pub enum VoteKind { Like, Dislike, None }
+
+impl VoteKind {
+    /// number of days added/subtracted from post expiry as a result of this vote
+    pub fn get_lifetime_weight(&self) -> i32 {
+        match self {
+            VoteKind::None => 0,
+            VoteKind::Like => 2,
+            VoteKind::Dislike => -1
+        }
+    }
+
+    pub fn as_str(&self) -> String {
+        match self {
+            VoteKind::Like => "like".to_string(),
+            VoteKind::Dislike => "dislike".to_string(),
+            VoteKind::None => "none".to_string()
+        }
+    }
+
+    pub fn from_str(value: &str) -> Self {
+        match value {
+            "like" => VoteKind::Like,
+            "dislike" => VoteKind::Dislike,
+            _ => VoteKind::None
+        }
+    }
+}

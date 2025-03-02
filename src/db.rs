@@ -1,12 +1,12 @@
 
 use bcrypt::{hash, DEFAULT_COST};
 use mongodb::{ 
-    bson::{bson, doc, Document}, error::Error as MongoError, options::Hint, results::UpdateResult, Client, Cursor, Database
+    bson::{bson, doc, Document}, error::{Error as MongoError, ErrorKind, WriteError, WriteFailure}, options::Hint, results::UpdateResult, Client, Cursor, Database
 };
 use nearsay_server::{current_time_ms, NearsayError};
 use serde::{de::DeserializeOwned, Deserialize};
 
-use crate::{area::Rect, delete_old::today, types::{Post, Guest, User, UserType, UserVotes, Vote, POI}};
+use crate::{area::Rect, delete_old::today, types::{Guest, Post, User, UserType, Vote, VoteKind, POI}};
 
 
 
@@ -27,7 +27,6 @@ impl NearsayDB {
         match 
             self.db.collection::<T>(collection)
             .find_one( doc!{ "_id": id } )
-            .projection(doc! {"votes": 0})
             .await
         {
             Err(mongo_err) => {
@@ -65,8 +64,6 @@ impl NearsayDB {
             },
             Ok(user) => Ok(user),
         }
-
-        //TODO: test if votes are included in return obj
     }
 
     pub async fn insert_guest(&self, uid: &str, avatar: usize, pos: &[f64]) -> Result<(), ()> {
@@ -124,7 +121,6 @@ impl NearsayDB {
                         "username": username,
                         "avatar": avatar as i32,
                         "hash": userhash,
-                        "votes": {}
                     }
                 }
             )
@@ -155,10 +151,10 @@ impl NearsayDB {
     }
 
     pub async fn set_user_pos(&self, uid: &str, new_pos: &[f64]) -> Result<(), ()> {
-        self.update_user(uid, &mut doc! { "pos": &new_pos as &[f64] }).await
+        self.update_user(uid, &mut doc! { "pos": &new_pos as &[f64] }).await.map_err(|_| ())
     }
 
-    pub async fn update_user(&self, uid: &str, update: &mut Document) -> Result<(), ()> {
+    pub async fn update_user(&self, uid: &str, update: &mut Document) -> Result<(), NearsayError> {
         update.insert("updated", current_time_ms() as i64);
 
         match
@@ -170,14 +166,25 @@ impl NearsayDB {
             .await
         {
             Err(mongo_err) => {
-                eprintln!("error updating user: {}", mongo_err);
-                Err(())
+
+                match *mongo_err.kind {
+                    ErrorKind::Write(WriteFailure::WriteError(WriteError {code, ..})) 
+                    if code == 11000 => {
+
+                        Err(NearsayError::UsernameTaken)
+                    },
+                    other => {
+                        eprintln!("error updating user: {}", other);
+                        Err(NearsayError::ServerError)
+                    }
+                }
+                    
             },
             Ok(_) => Ok(()),
         }
     }
 
-    async fn get_user_type(&self, uid: &str) -> Result<Option<UserType>, ()> {
+    pub async fn get_user_type(&self, uid: &str) -> Result<Option<UserType>, ()> {
         match 
             self.db.collection::<Document>("users")
             .find_one(doc! { "_id": uid })
@@ -266,87 +273,92 @@ impl NearsayDB {
     }
     
 
-    pub async fn get_vote(&self, uid: &str, post_id: &str) -> Result<Vote, MongoError> {
-        let res = self.db.collection::<UserVotes>("users")
-            .find_one(doc! { "_id": uid })
-            .projection(doc! { format!("votes.{}", post_id): 1 }) 
-            .await;
-        
-        match res {
-            Ok(Some(user_vote)) => {
-                match user_vote.votes.get(post_id) {
-                    Some(vote) => Ok(vote.clone().into()),
-                    None => Ok(Vote::None),
-                }
-            },
-            Ok(None) => Ok(Vote::None),
+    pub async fn get_vote(&self, uid: &str, post_id: &str) -> Result<VoteKind, ()> {
+        match 
+            self.db.collection::<Document>("votes")
+            .find_one( doc!{ "post_id": post_id, "uid": uid } )
+            .hint(Hint::Name("post_id_text_uid_text".to_string()))
+            .await
+        {
             Err(mongo_err) => {
                 eprintln!("error getting vote {}", mongo_err);
-                Err(mongo_err)
+                Err(())
             },
+            Ok(None) => Ok(VoteKind::None),
+            Ok(Some(document)) => Ok(VoteKind::from_str(document.get_str("kind").unwrap()))
         }
     }
 
-    pub async fn insert_vote(&self, uid: &str, post_id: &str, vote: Vote) -> Result<(), MongoError> {
-
+    pub async fn insert_vote(&self, uid: &str, post_id: &str, vote: VoteKind) -> Result<(), ()> {
         let prev_vote = self.get_vote(uid, post_id).await?;
 
-        if vote == prev_vote { return Ok(()); }
+        if vote == prev_vote { return Ok(()) }
 
-        let update_user_vote_res = match vote {
-            Vote::None => {
-                self.db.collection::<User>("users")
-                    .update_one( 
-                        doc! {"_id": uid}, 
-                        doc! { "$unset": { format!("votes.{}", post_id): 1 }}
-                    ).await
-            },
-            _ => {
-                self.db.collection::<User>("users")
-                    .update_one( 
-                        doc! {"_id": uid}, 
-                        doc! { "$set": { format!("votes.{}", post_id): Into::<String>::into(vote.clone()) }}
-                    ).await
-            }
-        };
-        
-        if let Err(mongo_err) = update_user_vote_res {
-            eprintln!("error updating user vote: {}", mongo_err);
-            return Err(mongo_err);
-        }
-        
         let delta_likes = match vote {
-            Vote::Like => 1,
+            VoteKind::Like => 1,
             _ => match prev_vote {
-                Vote::Like => -1,
+                VoteKind::Like => -1,
                 _ => 0,
             },
         };
         let delta_dislikes = match vote {
-            Vote::Dislike => 1,
+            VoteKind::Dislike => 1,
             _ => match prev_vote {
-                Vote::Dislike => -1,
+                VoteKind::Dislike => -1,
                 _ => 0,
             },
         };
 
-        if let Err(mongo_err) = self.db.collection::<Post>("posts")
+        // update counters in posts
+        if let Err(mongo_err) =  
+            self.db.collection::<Post>("posts")
             .update_one(
                 doc! {"_id": post_id},
                 doc! {
                     "$inc": {
                         "likes": delta_likes,
                         "dislikes": delta_dislikes,
-                        "expiry": vote.as_lifetime_weight() - prev_vote.as_lifetime_weight()
+                        "expiry": vote.get_lifetime_weight() - prev_vote.get_lifetime_weight()
                     }
                 }
             ).await
         {
             eprintln!("error updating like/dislike/expiry for post on vote: {}", mongo_err);
-            return Err(mongo_err);
+            return Err(());
         }
 
-        Ok(())
+        // update votes collection
+        match vote {
+            VoteKind::None => match 
+                self.db.collection::<Document>("votes")
+                    .delete_one(doc! { "post_id": post_id, "uid": uid } )
+                    .await
+            {
+                Err(mongo_err) => {
+                    eprintln!("error deleting vote {}", mongo_err);
+                    Err(())
+                },
+                Ok(_) => Ok(()),
+            }
+
+            other => match 
+                self.db.collection::<Document>("votes")
+                    .update_one(
+                        doc! { "post_id": post_id, "uid": uid },
+                        doc! { "$set": { "kind": other.as_str() } }
+                    )
+                    .upsert(true)
+                    .await
+            {
+                Err(mongo_err) => {
+                    eprintln!("error updating vote {}", mongo_err);
+                    Err(())
+                },
+                Ok(_) => Ok(()),
+            }
+            
+        }
+
     }
 
     pub async fn increment_view(&self, post_id: &str) -> Result<UpdateResult, MongoError> {
