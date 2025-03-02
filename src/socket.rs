@@ -71,7 +71,8 @@ struct StartSessionData {
 #[derive(Deserialize, Debug)]
 struct SignOutData {
     jwt: String,
-    stay_online: bool
+    stay_online: Option<bool>,
+    delete_account: Option<bool>
 }
 
 #[derive(Deserialize, Debug)]
@@ -228,7 +229,7 @@ pub fn on_socket_connect(client_socket: SocketRef, db: &NearsayDB, key: &Hmac<Sh
         "sign-out",
         clone_into_closure! {
             (db, key)
-            |client_socket: SocketRef, Data(SignOutData{jwt, stay_online}), ack: AckSender| async move {
+            |client_socket: SocketRef, Data(SignOutData{jwt, stay_online, delete_account}), ack: AckSender| async move {
 
                 // get uid from jwt
                 let Ok(JWTPayload { uid }) = authenticate_jwt(&key, &jwt)
@@ -248,19 +249,25 @@ pub fn on_socket_connect(client_socket: SocketRef, db: &NearsayDB, key: &Hmac<Sh
                     },
                 };
 
-                // sign out in db
-                if let Err(nearsay_err) = db.sign_out(&uid).await {
-                    return ack.send(&nearsay_err.to_status_code()).unwrap()
+                // deleting account
+                if Some(true) == delete_account {
+                    if db.delete_user(&uid).await.is_err() {
+                        return ack.send(&500).unwrap();
+                    }
+                }
+
+                // signing out
+                else {
+                    if let Err(nearsay_err) = db.sign_out(&uid).await {
+                        return ack.send(&nearsay_err.to_status_code()).unwrap()
+                    }
                 }
 
                 broadcast_at(&client_socket, pos, "user-left", BroadcastTargets::ExcludingSelf,
                     &json!( { "uid": uid } )
                 );
 
-                
-
-                if stay_online {
-                    Data(NewGuestData {pos, avatar});
+                if let Some(true) = stay_online {
                     create_guest(&db, &key, client_socket, Data(NewGuestData {pos, avatar}), ack).await;
                 }
                 else {
@@ -337,6 +344,8 @@ pub fn on_socket_connect(client_socket: SocketRef, db: &NearsayDB, key: &Hmac<Sh
             }
         }
     );
+
+
 
     client_socket.on(
         "post",

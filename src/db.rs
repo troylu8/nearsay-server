@@ -37,14 +37,14 @@ impl NearsayDB {
         }
     }
 
-    pub async fn delete(&self, collection: &str, id: &str) -> Result<(), ()> {
+    async fn delete(&self, collection: &str, id: &str) -> Result<(), ()> {
         match 
             self.db.collection::<Document>(collection)
             .delete_one( doc!{ "_id": id } )
             .await
         {
             Err(mongo_err) => {
-                eprintln!("error getting item {}", mongo_err);
+                eprintln!("error deleting item {}", mongo_err);
                 Err(())
             },
             Ok(_) => Ok(())
@@ -229,24 +229,35 @@ impl NearsayDB {
         
     }
 
-    pub async fn set_avatar(&self, uid: &str, new_avatar: usize) -> Result<(), ()> {
-        if let Err(mongo_err) = self.db.collection::<User>("users").update_one(
-                doc! { "_id": uid },
-                doc! { 
-                    "$set": {
-                        "avatar": new_avatar as i32,
-                        "updated": current_time_ms() as i64
-                    }
-                }
-            ).await
-        {
-            eprintln!("error moving user: {}", mongo_err);
-            return Err(());
-        }
+    pub async fn delete_user(&self, uid: &str) -> Result<(), ()> {
+        self.delete("users", uid).await?;
 
-        Ok(())
+        // delete user's votes
+        match 
+            self.db.collection::<Document>("votes")
+            .delete_many(doc! { "uid": uid })
+            .hint(Hint::Name("uid_1".to_string()))
+            .await
+        {
+            Ok(_) => Ok(()),
+            Err(_) => Err(())
+        }
     }
 
+    pub async fn delete_post(&self, post_id: &str) -> Result<(), ()> {
+        self.delete("posts", post_id).await?;
+
+        // delete post votes
+        match 
+            self.db.collection::<Document>("votes")
+            .delete_many(doc! { "post_id": post_id })
+            .hint(Hint::Name("post_id_1".to_string()))
+            .await
+        {
+            Ok(_) => Ok(()),
+            Err(_) => Err(())
+        }
+    }
 
     pub async fn insert_post(&self, author: &str, pos: &[f64], body: &str) -> Result<(String, i64), MongoError> {
         
