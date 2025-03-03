@@ -250,8 +250,8 @@ impl NearsayDB {
         // delete post votes
         match 
             self.db.collection::<Document>("votes")
-            .delete_many(doc! { "post_id": post_id })
-            .hint(Hint::Name("post_id_1".to_string()))
+            .delete_many(doc! { "postId": post_id })
+            .hint(Hint::Name("postId_1".to_string()))
             .await
         {
             Ok(_) => Ok(()),
@@ -259,7 +259,7 @@ impl NearsayDB {
         }
     }
 
-    pub async fn insert_post(&self, author: &str, pos: &[f64], body: &str) -> Result<(String, i64), MongoError> {
+    pub async fn insert_post(&self, author_id: Option<&str>, pos: &[f64], body: &str) -> Result<(String, i64), MongoError> {
         
         let post_id = gen_id();
         let millis: i64 = current_time_ms() as i64;
@@ -269,7 +269,7 @@ impl NearsayDB {
             "pos": pos,
             "updated": millis,
 
-            "author": author,
+            "authorId": author_id,
             "body": body,
             "likes": 0,
             "dislikes": 0,
@@ -288,7 +288,7 @@ impl NearsayDB {
         match 
             self.db.collection::<Document>("votes")
             .find_one( doc!{ "post_id": post_id, "uid": uid } )
-            .hint(Hint::Name("post_id_text_uid_text".to_string()))
+            .hint(Hint::Name("postId_1_uid_1".to_string()))
             .await
         {
             Err(mongo_err) => {

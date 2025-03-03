@@ -9,7 +9,7 @@ use serde_json::json;
 use sha2::Sha256;
 use socketioxide::extract::{AckSender, Data, SocketRef};
 
-use crate::{area::{Rect, TileRegion}, auth::{authenticate_jwt, create_jwt, verify_password, JWTPayload}, db::{gen_id, NearsayDB}, types::{Post, User, POI}};
+use crate::{area::{Rect, TileRegion}, auth::{self, authenticate_jwt, create_jwt, verify_password, JWTPayload}, db::{gen_id, NearsayDB}, types::{Post, User, POI}};
 
 #[derive(Serialize, Deserialize, Debug)]
 struct ViewShiftedData {
@@ -352,15 +352,19 @@ pub fn on_socket_connect(client_socket: SocketRef, db: &NearsayDB, key: &Hmac<Sh
         clone_into_closure! {
             (db, key)
             |client_socket: SocketRef, Data(NewPostData {jwt, pos, body})| async move {
-                let author = match jwt {
-                    None => "[anonymous]".to_string(),
+                let author_id_owned;
+                let author_id = match jwt {
+                    None => None,
                     Some(jwt) => match authenticate_jwt(&key, &jwt) {
                         Err(()) => return,
-                        Ok(JWTPayload {uid, ..}) => uid
+                        Ok(JWTPayload {uid, ..}) => {
+                            author_id_owned = uid;
+                            Some(&author_id_owned[..])
+                        }
                     }
                 };
-                
-                if let Ok((post_id, ms_created)) = db.insert_post(&author, &pos, &body).await {
+
+                if let Ok((post_id, ms_created)) = db.insert_post(author_id, &pos, &body).await {
                     
                     const BLURB_LENGTH: usize = 10;
 

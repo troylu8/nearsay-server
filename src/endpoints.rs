@@ -11,8 +11,8 @@ use crate::{auth::{authenticate_with_header, create_jwt, JWTPayload}, db::{gen_i
 
 
 
-fn json_response<T: Serialize>(status: u16, json: T) -> Response<Body> {
-    let body = Into::<Body>::into(serde_json::to_vec(&json).unwrap());
+fn json_response<T: Serialize>(status: u16, serializable: T) -> Response<Body> {
+    let body = Into::<Body>::into(serde_json::to_vec(&serializable).unwrap());
 
     Response::builder()
         .status(status)
@@ -72,15 +72,25 @@ pub fn get_endpoints_router(db: &NearsayDB, key: &Hmac<Sha256>) -> axum::Router 
                         Err(_) => empty_response(500),
                         Ok(None) => empty_response(404),
                         Ok(Some(post)) => {
-                            println!("{post_id}", );
+                            
 
                             // add author name to response
-                            let author_name = match db.get::<User>("users", &post.author).await {
-                                Ok(Some(user)) => user.username,
-                                _ => "".to_string()
+                            let author_name = match &post.authorId {
+                                None => None,
+                                Some(author_id) => 
+                                    match db.get::<User>("users", &author_id).await {
+                                        Ok(Some(user)) => Some(user.username),
+                                        _ => None
+                                    }
                             };
+
                             let mut post = json!(post);
-                            post.as_object_mut().unwrap().insert("author_name".to_string(), Value::String(author_name));
+                            if let Some(author_name) = author_name {
+                                post.as_object_mut().unwrap().insert("authorName".to_string(), Value::String(author_name));
+                            }
+                            else {
+                                post.as_object_mut().unwrap().remove("authorId");
+                            }
 
                             let mut response_body = json! ({"post": post});
 
@@ -99,5 +109,20 @@ pub fn get_endpoints_router(db: &NearsayDB, key: &Hmac<Sha256>) -> axum::Router 
                 }
             }
         ))
-        
+        .route("/users/{uid}", get(
+            clone_into_closure! {
+                (db)
+                |Path(uid): Path<String>| async move { 
+                    match db.get::<User>("users", &uid).await {
+                        Err(_) => empty_response(500),
+                        Ok(None) => empty_response(404),
+                        Ok(Some(user)) => {
+                            let mut user = json!(user);
+                            user.as_object_mut().unwrap().remove("hash").unwrap();
+                            json_response(200, user)
+                        },
+                    }
+                }
+            }
+        ))
 }

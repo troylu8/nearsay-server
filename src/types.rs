@@ -1,5 +1,4 @@
-use std::collections::BTreeMap;
-use mongodb::bson::{doc, oid::ObjectId, Document};
+use mongodb::bson::{doc, Document};
 use serde::{Deserialize, Serialize};
 
 pub trait POI {
@@ -8,12 +7,13 @@ pub trait POI {
 
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
+#[allow(non_snake_case)]
 pub struct Post {
     pub _id: String,
     pub pos: [f64; 2],
     pub updated: u64,
 
-    pub author: String,
+    pub authorId: Option<String>,
     pub body: String,
     pub likes: usize,
     pub dislikes: usize,
