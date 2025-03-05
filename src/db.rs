@@ -51,7 +51,7 @@ impl NearsayDB {
         }
     }
 
-    pub async fn get_user(&self, username: &str) -> Result<Option<User>, ()> {
+    pub async fn get_user_from_username(&self, username: &str) -> Result<Option<User>, ()> {
         match 
             self.db.collection::<User>("users")
             .find_one(doc! {"username": username})

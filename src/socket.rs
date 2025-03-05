@@ -81,6 +81,13 @@ struct EditUserData {
     update: Document
 }
 
+#[derive(Deserialize, Debug)]
+struct ChatData {
+    jwt: String,
+    msg: String,
+    pos: [f64; 2]
+}
+
 pub fn on_socket_connect(client_socket: SocketRef, db: &NearsayDB, key: &Hmac<Sha256>) {
 
     async fn create_guest(db: &NearsayDB, key: &Hmac<Sha256>, client_socket: SocketRef, Data(NewGuestData {pos, avatar}): Data<NewGuestData>, ack: AckSender) {
@@ -115,7 +122,7 @@ pub fn on_socket_connect(client_socket: SocketRef, db: &NearsayDB, key: &Hmac<Sh
             |client_socket: SocketRef, Data(SignInData{username, userhash, pos}), ack: AckSender| async move {
                 
                 // check if user exists
-                let user = match db.get_user(&username).await {
+                let user = match db.get_user_from_username(&username).await {
                     Err(_) => return ack.send(&500).unwrap(),
                     Ok(None) => return ack.send(&404).unwrap(),
                     Ok(Some(user)) => user
@@ -386,6 +393,27 @@ pub fn on_socket_connect(client_socket: SocketRef, db: &NearsayDB, key: &Hmac<Sh
             }
         }
     );
+
+    client_socket.on(
+        "chat",
+        clone_into_closure! {
+            (key)
+            |client_socket: SocketRef, Data(ChatData { jwt, msg, pos }), ack: AckSender| async move {
+                let Ok( JWTPayload{ uid } ) = authenticate_jwt(&key, &jwt)
+                else { return };
+
+                println!("{uid}", );
+
+                broadcast_at(&client_socket, pos, "chat", BroadcastTargets::IncludingSelf,
+                    &json!({
+                        "uid": uid,
+                        "msg": msg
+                    })
+                );
+
+            }
+        }
+    )
 
 }
 
