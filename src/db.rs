@@ -6,18 +6,18 @@ use mongodb::{
 use nearsay_server::{current_time_ms, NearsayError};
 use serde::{de::DeserializeOwned, Deserialize};
 
-use crate::{area::Rect, delete_old::today, types::{Guest, Post, User, UserType, Vote, VoteKind, POI}};
+use crate::{area::Rect, clear_old_posts::today, types::{Guest, Post, User, UserType, Vote, VoteKind, POI}};
 
 
 
 #[derive(Clone)]
 pub struct NearsayDB {
-    pub db: Database
+    pub mongo_db: Database
 }
 impl NearsayDB {
     pub async fn new() -> Self {
         Self {
-            db: Client::with_uri_str("mongodb://localhost:27017").await.unwrap().database("nearsay")
+            mongo_db: Client::with_uri_str("mongodb://localhost:27017").await.unwrap().database("nearsay")
         }
     }
 
@@ -25,7 +25,7 @@ impl NearsayDB {
     where T: Send + Sync + DeserializeOwned
     {
         match 
-            self.db.collection::<T>(collection)
+            self.mongo_db.collection::<T>(collection)
             .find_one( doc!{ "_id": id } )
             .await
         {
@@ -39,7 +39,7 @@ impl NearsayDB {
 
     async fn delete(&self, collection: &str, id: &str) -> Result<(), ()> {
         match 
-            self.db.collection::<Document>(collection)
+            self.mongo_db.collection::<Document>(collection)
             .delete_one( doc!{ "_id": id } )
             .await
         {
@@ -53,7 +53,7 @@ impl NearsayDB {
 
     pub async fn get_user_from_username(&self, username: &str) -> Result<Option<User>, ()> {
         match 
-            self.db.collection::<User>("users")
+            self.mongo_db.collection::<User>("users")
             .find_one(doc! {"username": username})
             .hint(Hint::Name("username_1".to_string()))
             .await
@@ -67,7 +67,7 @@ impl NearsayDB {
     }
 
     pub async fn insert_guest(&self, uid: &str, avatar: usize, pos: &[f64]) -> Result<(), ()> {
-        if let Err(mongo_err) = self.db.collection("users").insert_one(doc! {
+        if let Err(mongo_err) = self.mongo_db.collection("users").insert_one(doc! {
             "_id": uid,
             "pos": pos,
             "avatar": avatar as i32,
@@ -87,7 +87,7 @@ impl NearsayDB {
 
         // check if username is taken
         match
-            self.db.collection::<User>("users")
+            self.mongo_db.collection::<User>("users")
             .count_documents(doc! {"username": username })
             .limit(1)
             .await 
@@ -110,7 +110,7 @@ impl NearsayDB {
         
         // insert user data into db
         match 
-            self.db.collection::<User>("users")
+            self.mongo_db.collection::<User>("users")
             .update_one(
                 doc! { "_id": uid },
                 doc! {
@@ -158,7 +158,7 @@ impl NearsayDB {
         update.insert("updated", current_time_ms() as i64);
 
         match
-            self.db.collection::<User>("users")
+            self.mongo_db.collection::<User>("users")
             .update_one(
                 doc! { "_id": uid },
                 doc! { "$set": update }
@@ -186,7 +186,7 @@ impl NearsayDB {
 
     pub async fn get_user_type(&self, uid: &str) -> Result<Option<UserType>, ()> {
         match 
-            self.db.collection::<Document>("users")
+            self.mongo_db.collection::<Document>("users")
             .find_one(doc! { "_id": uid })
             .await
         {
@@ -211,7 +211,7 @@ impl NearsayDB {
             },
             Ok(Some(UserType::User)) => {
                 match 
-                    self.db.collection::<User>("users")
+                    self.mongo_db.collection::<User>("users")
                     .update_one(
                         doc! { "_id": uid }, 
                         doc! { "$unset": { "pos": "" } }
@@ -234,7 +234,7 @@ impl NearsayDB {
 
         // delete user's votes
         match 
-            self.db.collection::<Document>("votes")
+            self.mongo_db.collection::<Document>("votes")
             .delete_many(doc! { "uid": uid })
             .hint(Hint::Name("uid_1".to_string()))
             .await
@@ -249,7 +249,7 @@ impl NearsayDB {
 
         // delete post votes
         match 
-            self.db.collection::<Document>("votes")
+            self.mongo_db.collection::<Document>("votes")
             .delete_many(doc! { "postId": post_id })
             .hint(Hint::Name("postId_1".to_string()))
             .await
@@ -264,7 +264,7 @@ impl NearsayDB {
         let post_id = gen_id();
         let millis: i64 = current_time_ms() as i64;
         
-        if let Err(mongo_err) = self.db.collection("posts").insert_one(doc! {
+        if let Err(mongo_err) = self.mongo_db.collection("posts").insert_one(doc! {
             "_id": post_id.clone(),
             "pos": pos,
             "updated": millis,
@@ -286,7 +286,7 @@ impl NearsayDB {
 
     pub async fn get_vote(&self, uid: &str, post_id: &str) -> Result<VoteKind, ()> {
         match 
-            self.db.collection::<Document>("votes")
+            self.mongo_db.collection::<Document>("votes")
             .find_one( doc!{ "post_id": post_id, "uid": uid } )
             .hint(Hint::Name("postId_1_uid_1".to_string()))
             .await
@@ -322,7 +322,7 @@ impl NearsayDB {
 
         // update counters in posts
         if let Err(mongo_err) =  
-            self.db.collection::<Post>("posts")
+            self.mongo_db.collection::<Post>("posts")
             .update_one(
                 doc! {"_id": post_id},
                 doc! {
@@ -341,7 +341,7 @@ impl NearsayDB {
         // update votes collection
         match vote {
             VoteKind::None => match 
-                self.db.collection::<Document>("votes")
+                self.mongo_db.collection::<Document>("votes")
                     .delete_one(doc! { "post_id": post_id, "uid": uid } )
                     .await
             {
@@ -353,7 +353,7 @@ impl NearsayDB {
             }
 
             other => match 
-                self.db.collection::<Document>("votes")
+                self.mongo_db.collection::<Document>("votes")
                     .update_one(
                         doc! { "post_id": post_id, "uid": uid },
                         doc! { "$set": { "kind": other.as_str() } }
@@ -374,7 +374,7 @@ impl NearsayDB {
 
     pub async fn increment_view(&self, post_id: &str) -> Result<UpdateResult, MongoError> {
 
-        let res = self.db.collection::<Post>("posts")
+        let res = self.mongo_db.collection::<Post>("posts")
             .update_one(
                 doc! { "_id": post_id }, 
                 doc! { "$inc": { 
@@ -412,7 +412,7 @@ impl NearsayDB {
             }
         };
 
-        self.db.collection::<T>(collection)
+        self.mongo_db.collection::<T>(collection)
             .aggregate(vec! [
                 query,
                 T::get_poi_projection()
