@@ -16,6 +16,8 @@ async fn clear_old_posts(db: Database) -> Result<DeleteResult, mongodb::error::E
 
 pub async fn start_task(db: Database) -> Result<(), JobSchedulerError> {
 
+    println!("starting clear old post task", );
+
     clear_old_posts(db.clone()).await.unwrap();
 
     let sched = JobScheduler::new().await?;

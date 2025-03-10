@@ -1,6 +1,16 @@
 use mongodb::bson::{doc, Document};
 use serde::{Deserialize, Serialize};
 
+#[derive(Debug, Serialize)]
+pub struct Cluster {
+    pub id: String,
+    pub x: f64,
+    pub y: f64,
+    pub size: f64,
+
+    pub blurb: Option<String>,
+}
+
 pub trait POI {
     fn get_poi_projection() -> Document;
 }
@@ -11,7 +21,6 @@ pub trait POI {
 pub struct Post {
     pub _id: String,
     pub pos: [f64; 2],
-    pub updated: u64,
 
     pub authorId: Option<String>,
     pub body: String,
@@ -26,7 +35,6 @@ impl POI for Post {
             "$project": {
                 "pos": 1,
                 "kind": "post",
-                "updated": 1,
 
                 "blurb": { "$substrCP": [ "$body", 0, 10 ]},
             }
@@ -39,7 +47,6 @@ impl POI for Post {
 pub struct User {
     pub _id: String,
     pub pos: Option<[f64; 2]>,
-    pub updated: u64,
 
     pub username: String,
     pub avatar: usize,
@@ -51,7 +58,6 @@ impl POI for User {
             "$project": {
                 "pos": 1,
                 "kind": "user",
-                "updated": 1,
 
                 "username": 1,
                 "avatar": 1,

@@ -9,22 +9,17 @@ use serde_json::json;
 use sha2::Sha256;
 use socketioxide::extract::{AckSender, Data, SocketRef};
 
-use crate::{area::{Rect, TileRegion}, auth::{self, authenticate_jwt, create_jwt, verify_password, JWTPayload}, db::{gen_id, NearsayDB}, types::{Post, User, POI}};
+use crate::{area::{Rect, TileRegion}, auth::{self, authenticate_jwt, create_jwt, verify_password, JWTPayload}, db::{gen_id, NearsayDB}, types::{Cluster, Post, User, POI}};
 
-#[derive(Serialize, Deserialize, Debug)]
-struct ViewShiftedData {
-    curr: [Option<TileRegion>; 2],
-    prev: [Option<TileRegion>; 2],
-    timestamps: HashMap<String, i64>
+#[derive(Deserialize, Debug)]
+struct ViewShiftData {
+    view: [Option<TileRegion>; 2],
 }
 
-#[derive(Serialize, Deserialize, Default, Debug)]
-struct ViewShiftedResponse {
-    /// list of poi ids to delete
-    delete: Vec<String>,
-    
-    /// list of pois to add/update
-    fresh: Vec<Document>,
+#[derive(Serialize, Default, Debug)]
+struct ViewShiftResponse {
+    posts: Vec<Cluster>,
+    users: Vec<Cluster>,
 }
 
 
@@ -289,14 +284,14 @@ pub fn on_socket_connect(client_socket: SocketRef, db: &NearsayDB, key: &Hmac<Sh
         "view-shift",
         clone_into_closure! {
             (db)
-            |client_socket: SocketRef, Data(ViewShiftedData {curr, prev, timestamps}), ack: AckSender| async move {
-                let mut resp = ViewShiftedResponse::default();
+            |client_socket: SocketRef, Data(ViewShiftData {view}), ack: AckSender| async move {
+                let mut resp = ViewShiftResponse::default();
                 
-                for i in 0..curr.len() {
-                    if let Some(curr_region) = &curr[i] {
-                        update_rooms(&client_socket, curr_region);
-                        add_pois_to_move_resp::<User>(&db, "users", &prev[i], curr_region, &timestamps, &mut resp).await;
-                        add_pois_to_move_resp::<Post>(&db, "posts", &prev[i], curr_region, &timestamps, &mut resp).await;
+                for region in view {
+                    if let Some(region) = region {
+                        update_rooms(&client_socket, &region);
+                        append_in_region::<User>(&db, "users", &region, &mut resp.users).await;
+                        append_in_region::<Post>(&db, "posts", &region, &mut resp.posts).await;
                     }
                 }
     
@@ -384,7 +379,6 @@ pub fn on_socket_connect(client_socket: SocketRef, db: &NearsayDB, key: &Hmac<Sh
                             "_id": post_id.clone(),
                             "pos": &pos as &[f64],
                             "kind": "post",
-                            "updated": ms_created,
             
                             "blurb": blurb,
                         })
@@ -417,29 +411,23 @@ pub fn on_socket_connect(client_socket: SocketRef, db: &NearsayDB, key: &Hmac<Sh
 
 }
 
-async fn add_pois_to_move_resp<T: Send + Sync + POI>(db: &NearsayDB, collection: &str, prev_region: &Option<TileRegion>, curr_region: &TileRegion, timestamps: &HashMap<String, i64>, resp: &mut ViewShiftedResponse) -> Option<Box<dyn std::error::Error>> {
-    let exclude = match prev_region {
-        Some(prev_region) => {
-            if prev_region.area.envelops(&curr_region.area) { return None }
-            Some(&prev_region.area)
-        },
-        None => None
-    };
+async fn append_in_region<T: Send + Sync + POI>(db: &NearsayDB, collection: &str, curr_region: &TileRegion, resp: &mut Vec<Cluster>) -> Option<Box<dyn std::error::Error>> {
     
-    let mut cursor = db.get_pois::<T>(collection, &curr_region.area, exclude).await;
+    // let mut cursor = db.get_pois::<T>(collection, &curr_region.area, exclude).await;
     
-    while let Some(poi) = cursor.try_next().await.unwrap() {
+    // while let Some(poi) = cursor.try_next().await.unwrap() {
         
-        let has_been_updated = match timestamps.get(poi.get("_id")?.as_str()?) {
-            Some(prev_timestamp) => poi.get("updated")?.as_i64()? > *prev_timestamp,
-            None => true,
-        };
-        if has_been_updated {
-            resp.fresh.push(poi);
-        }
-    }
+    //     let has_been_updated = match timestamps.get(poi.get("_id")?.as_str()?) {
+    //         Some(prev_timestamp) => poi.get("updated")?.as_i64()? > *prev_timestamp,
+    //         None => true,
+    //     };
+    //     if has_been_updated {
+    //         resp.fresh.push(poi);
+    //     }
+    // }
 
-    None
+    // None
+    todo!()
 }
 
 

@@ -6,19 +6,20 @@ use mongodb::{
 use nearsay_server::{current_time_ms, NearsayError};
 use serde::{de::DeserializeOwned, Deserialize};
 
-use crate::{area::Rect, clear_old_posts::today, types::{Guest, Post, User, UserType, Vote, VoteKind, POI}};
+use crate::{area::Rect, cache::NearsayCache, clear_old_posts::{self, today}, types::{Guest, Post, User, UserType, Vote, VoteKind, POI}};
 
 
 
 #[derive(Clone)]
 pub struct NearsayDB {
-    pub mongo_db: Database
+    mongo_db: Database,
 }
 impl NearsayDB {
     pub async fn new() -> Self {
-        Self {
-            mongo_db: Client::with_uri_str("mongodb://localhost:27017").await.unwrap().database("nearsay")
-        }
+        let mongo_db = Client::with_uri_str("mongodb://localhost:27017").await.unwrap().database("nearsay");
+        clear_old_posts::start_task(mongo_db.clone()).await.unwrap();
+        
+        Self { mongo_db }
     }
 
     pub async fn get<T>(&self, collection: &str, id: &str) -> Result<Option<T>, ()> 
@@ -71,7 +72,6 @@ impl NearsayDB {
             "_id": uid,
             "pos": pos,
             "avatar": avatar as i32,
-            "updated": current_time_ms() as i64,
         }).await {
             eprintln!("mongodb error when starting  guest: {}", &mongo_err);
             return Err(())
@@ -116,7 +116,6 @@ impl NearsayDB {
                 doc! {
                     "$set": {
                         // no position field yet
-                        "updated": current_time_ms() as i64,
                         
                         "username": username,
                         "avatar": avatar as i32,
@@ -155,7 +154,6 @@ impl NearsayDB {
     }
 
     pub async fn update_user(&self, uid: &str, update: &mut Document) -> Result<(), NearsayError> {
-        update.insert("updated", current_time_ms() as i64);
 
         match
             self.mongo_db.collection::<User>("users")
@@ -267,7 +265,6 @@ impl NearsayDB {
         if let Err(mongo_err) = self.mongo_db.collection("posts").insert_one(doc! {
             "_id": post_id.clone(),
             "pos": pos,
-            "updated": millis,
 
             "authorId": author_id,
             "body": body,

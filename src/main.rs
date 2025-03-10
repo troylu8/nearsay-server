@@ -10,6 +10,7 @@ use nearsay_server::clone_into_closure;
 
 mod area;
 mod types;
+mod cache;
 mod db;
 mod clear_old_posts;
 mod endpoints;
@@ -21,8 +22,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     dotenvy::dotenv()?;
 
     let nearsay_db = NearsayDB::new().await;
-
-    clear_old_posts::start_task(nearsay_db.clone().mongo_db).await.unwrap();
 
     let (socketio_layer, io) = SocketIo::new_layer();
 
