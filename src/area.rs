@@ -1,12 +1,10 @@
 use mongodb::bson::{doc, Bson, Document};
 use serde::{Serialize, Deserialize};
 
-use num_cmp::NumCmp;
-
 #[derive(Serialize, Deserialize, Debug)]
 pub struct TileRegion {
     pub depth: usize,
-    pub area: Rect<f64>
+    pub area: Rect
 }
 impl TileRegion {
     pub const BOUND: usize = 180;
@@ -17,24 +15,9 @@ impl TileRegion {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-pub struct Rect<T> { pub top: T, pub bottom: T, pub left: T, pub right: T }
+pub struct Rect { pub top: f64, pub bottom: f64, pub left: f64, pub right: f64 }
 
-impl<T: Copy + std::fmt::Debug> Rect<T> {
-
-    /// bottom left inclusive, top right exclusive 
-    pub fn contains<NumType: NumCmp<T>>(&self, x: NumType, y: NumType) -> bool {
-        x.num_ge(self.left) && x.num_lt(self.right) && y.num_ge(self.bottom) && y.num_lt(self.top)
-    }
-
-    pub fn envelops<NumType: NumCmp<T> + std::fmt::Debug>(&self, smaller: &Rect<NumType>) -> bool {
-        return  smaller.top.num_le(self.top) && 
-                smaller.bottom.num_ge(self.bottom) && 
-                smaller.left.num_ge(self.left) && 
-                smaller.right.num_le(self.right);
-    }
-}
-
-impl<T: Into<Bson> + Copy> Rect<T> {
+impl Rect {
     pub fn as_geo_json(&self) -> Document {
         doc! {
             "$geometry": {

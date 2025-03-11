@@ -6,20 +6,23 @@ use mongodb::{
 use nearsay_server::{current_time_ms, NearsayError};
 use serde::{de::DeserializeOwned, Deserialize};
 
-use crate::{area::Rect, cache::NearsayCache, clear_old_posts::{self, today}, types::{Guest, Post, User, UserType, Vote, VoteKind, POI}};
+use crate::{area::Rect, cache::NearsayCache, clear_old_posts::{self, today}, cluster::Cluster, types::{Guest, Post, User, UserType, Vote, VoteKind, POI}};
 
 
 
 #[derive(Clone)]
 pub struct NearsayDB {
+    cache: NearsayCache,
     mongo_db: Database,
 }
 impl NearsayDB {
     pub async fn new() -> Self {
         let mongo_db = Client::with_uri_str("mongodb://localhost:27017").await.unwrap().database("nearsay");
-        clear_old_posts::start_task(mongo_db.clone()).await.unwrap();
         
-        Self { mongo_db }
+        clear_old_posts::start_task(mongo_db.clone()).await.unwrap();
+        println!("creating new nearsay db", );
+
+        Self { cache: NearsayCache::new().await.unwrap(),  mongo_db }
     }
 
     pub async fn get<T>(&self, collection: &str, id: &str) -> Result<Option<T>, ()> 
@@ -389,29 +392,24 @@ impl NearsayDB {
         }   
     }
 
-    pub async fn get_pois<T>(&self, collection: &str, within: &Rect<f64>, exclude: Option<&Rect<f64>>) -> Cursor<Document>
+    pub async fn geoquery_posts(&mut self, layer: usize, query: &Rect) -> Vec<Cluster> {
+        if let Ok(Some(posts)) = self.cache.geoquery_posts(layer, query).await {
+            return posts;
+        }
+
+        
+
+        vec![]
+    }
+
+    async fn get_pois<T>(&self, collection: &str, within: &Rect) -> Cursor<Document>
     where T: Send + Sync + POI
     {
-
-        let query = match exclude {
-            Some(exclude) => {
-                doc! {
-                    "$match": {
-                        "$and": [
-                            {"pos": { "$geoWithin": within.as_geo_json() }},
-                            {"pos": { "$not": { "$geoWithin": exclude.as_geo_json() } }},
-                        ] 
-                    }
-                }
-            },
-            None => doc! {
-                "$match": { "pos": { "$geoWithin": within.as_geo_json() } }
-            }
-        };
-
         self.mongo_db.collection::<T>(collection)
             .aggregate(vec! [
-                query,
+                doc! {
+                    "$match": { "pos": { "$geoWithin": within.as_geo_json() } }
+                },
                 T::get_poi_projection()
             ])
             .hint( Hint::Name("pos_2dsphere".to_string()) )

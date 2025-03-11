@@ -1,16 +1,6 @@
 use mongodb::bson::{doc, Document};
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Serialize)]
-pub struct Cluster {
-    pub id: String,
-    pub x: f64,
-    pub y: f64,
-    pub size: f64,
-
-    pub blurb: Option<String>,
-}
-
 pub trait POI {
     fn get_poi_projection() -> Document;
 }

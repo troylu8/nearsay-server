@@ -312,7 +312,11 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ba5a308b75df32fe02788e748662718f03fde005016435c444eea572398219fd"
 dependencies = [
  "bytes",
+ "futures-core",
  "memchr",
+ "pin-project-lite",
+ "tokio",
+ "tokio-util",
 ]
 
 [[package]]
@@ -1327,7 +1331,7 @@ dependencies = [
  "tokio",
  "tokio-rustls",
  "tokio-util",
- "typed-builder 0.10.0",
+ "typed-builder",
  "uuid 1.13.1",
  "webpki-roots",
 ]
@@ -1356,8 +1360,6 @@ dependencies = [
  "job_scheduler",
  "jwt",
  "mongodb",
- "num-cmp",
- "r2d2",
  "rand",
  "redis",
  "redis-macros",
@@ -1369,8 +1371,6 @@ dependencies = [
  "tokio-cron-scheduler",
  "tower",
  "tower-http",
- "typed-builder 0.20.0",
- "uuid 1.13.1",
 ]
 
 [[package]]
@@ -1391,12 +1391,6 @@ dependencies = [
  "num-integer",
  "num-traits",
 ]
-
-[[package]]
-name = "num-cmp"
-version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "63335b2e2c34fae2fb0aa2cecfd9f0832a1e24b3b32ecec612c3426d46dc8aaa"
 
 [[package]]
 name = "num-conv"
@@ -1591,14 +1585,19 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8034fb926579ff49d3fe58d288d5dcb580bf11e9bccd33224b45adebf0fd0c23"
 dependencies = [
  "arc-swap",
+ "bytes",
  "combine",
+ "futures-util",
  "itoa",
  "num-bigint",
  "percent-encoding",
+ "pin-project-lite",
  "r2d2",
  "ryu",
  "sha1_smol",
  "socket2",
+ "tokio",
+ "tokio-util",
  "url",
 ]
 
@@ -2334,26 +2333,6 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 1.0.109",
-]
-
-[[package]]
-name = "typed-builder"
-version = "0.20.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7e14ed59dc8b7b26cacb2a92bad2e8b1f098806063898ab42a3bd121d7d45e75"
-dependencies = [
- "typed-builder-macro",
-]
-
-[[package]]
-name = "typed-builder-macro"
-version = "0.20.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "560b82d656506509d43abe30e0ba64c56b1953ab3d4fe7ba5902747a7a3cedd5"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn 2.0.98",
 ]
 
 [[package]]

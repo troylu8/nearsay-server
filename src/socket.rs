@@ -9,7 +9,7 @@ use serde_json::json;
 use sha2::Sha256;
 use socketioxide::extract::{AckSender, Data, SocketRef};
 
-use crate::{area::{Rect, TileRegion}, auth::{self, authenticate_jwt, create_jwt, verify_password, JWTPayload}, db::{gen_id, NearsayDB}, types::{Cluster, Post, User, POI}};
+use crate::{area::{Rect, TileRegion}, auth::{authenticate_jwt, create_jwt, verify_password, JWTPayload}, cluster::Cluster, db::{gen_id, NearsayDB}, types::{Post, User, POI}};
 
 #[derive(Deserialize, Debug)]
 struct ViewShiftData {
