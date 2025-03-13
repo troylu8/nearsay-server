@@ -48,15 +48,22 @@ mod auth;
 //     Ok(())
 // }
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+async fn main() {
 
     let mut nearsay_db = NearsayDB::new().await;
 
+    // let (post_id, ..) = nearsay_db.insert_post(None, &[7.0, 7.0], "first post").await.unwrap();
+    // println!("inserted post {}", post_id);
+    // let (post_id, ..) = nearsay_db.insert_post(None, &[7.0, 7.0], "second post long body").await.unwrap();
+    // println!("inserted post {}", post_id);
+    let (post_id, ..) = nearsay_db.insert_post(None, &[70.0, 70.0], "faraway post").await.unwrap();
+    println!("inserted post {}", post_id);
+
+
     let posts = 
-        nearsay_db.geoquery_posts(10, &Rect {top: 10.0, bottom: 0.0, left: 0.0, right: 10.0 }).await;
+        nearsay_db.geoquery_post_pts(3, &Rect {top: 10.0, bottom: 0.0, left: 0.0, right: 10.0 }).await;
 
 
     println!("{:?}", posts);
 
-    Ok(())
 }

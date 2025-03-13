@@ -366,14 +366,8 @@ pub fn on_socket_connect(client_socket: SocketRef, db: &NearsayDB, key: &Hmac<Sh
                     }
                 };
 
-                if let Ok((post_id, ms_created)) = db.insert_post(author_id, &pos, &body).await {
+                if let Ok((post_id, blurb)) = db.clone().insert_post(author_id, &pos, &body).await {
                     
-                    const BLURB_LENGTH: usize = 10;
-
-                    let blurb = 
-                        if body.len() <= BLURB_LENGTH { body } 
-                        else { format!("{}...", body[..BLURB_LENGTH].to_string()) };
-
                     broadcast_at(&client_socket, pos, "new-poi", BroadcastTargets::IncludingSelf,
                         & json! ({
                             "_id": post_id.clone(),

@@ -1,4 +1,6 @@
 use std::collections::{HashSet, HashMap};
+use mongodb::bson::Document;
+use redis::{aio::MultiplexedConnection, geo::{Coord, RadiusSearchResult}, AsyncCommands};
 use serde::Serialize;
 
 
@@ -10,7 +12,6 @@ pub struct Cluster {
 
     pub blurb: Option<String>,
 }
-
 impl Cluster {
 
     pub fn new(x: f64, y: f64) -> Self {
@@ -29,7 +30,7 @@ impl Cluster {
         }
     }
 
-    pub fn merge_with(&mut self, other: &Cluster) {
+    pub fn absorb(&mut self, other: &Cluster) {
         self.x = (self.size as f64 * self.x + other.size as f64 * other.x) / (self.size + other.size) as f64;
         self.y = (self.size as f64 * self.y + other.size as f64 * other.y) / (self.size + other.size) as f64;
         
@@ -46,6 +47,26 @@ impl Cluster {
     }
 }
 
+impl From<Document> for Cluster {
+    fn from(doc: Document) -> Self {
+        
+        let [ref x, ref y] = doc.get_array("pos").unwrap()[..2] 
+        else { panic!("'pos' array doesn't have enough elements") };
+        
+        Self {
+            x: x.as_f64().unwrap(),
+            y: y.as_f64().unwrap(),
+            size: doc.get_i32("size").unwrap() as usize,
+            blurb: 
+                match doc.get_str("blurb") {
+                    Err(_) => None,
+                    Ok(blurb) => Some(blurb.to_string()),
+                }
+        }
+    }
+}
+
+
 pub fn cluster(pts: &[Cluster], radius: f64) -> Vec<Cluster> {
     if radius <= 0.0 { return pts.to_vec() }
 
@@ -61,7 +82,7 @@ pub fn cluster(pts: &[Cluster], radius: f64) -> Vec<Cluster> {
 
         match grid.get_mut(&bucket) {
             None => { grid.insert(bucket, new_pt.clone()); },
-            Some(inhabitant) => { inhabitant.merge_with(new_pt); }
+            Some(inhabitant) => { inhabitant.absorb(new_pt); }
         }
     }
 
@@ -101,7 +122,7 @@ fn cluster_grid_dfs(
         
         // add current item to final cluster
         Some(final_cluster) => {
-            final_cluster.merge_with(grid.get_mut(&bucket_pos).unwrap());
+            final_cluster.absorb(grid.get_mut(&bucket_pos).unwrap());
         },
     }
 

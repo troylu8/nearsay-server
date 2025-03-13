@@ -1,5 +1,6 @@
 
 use bcrypt::{hash, DEFAULT_COST};
+use futures::TryStreamExt;
 use mongodb::{ 
     bson::{bson, doc, Document}, error::{Error as MongoError, ErrorKind, WriteError, WriteFailure}, options::Hint, results::UpdateResult, Client, Cursor, Database
 };
@@ -260,10 +261,10 @@ impl NearsayDB {
         }
     }
 
-    pub async fn insert_post(&self, author_id: Option<&str>, pos: &[f64], body: &str) -> Result<(String, i64), MongoError> {
+    /// returns (post id, blurb)
+    pub async fn insert_post(&mut self, author_id: Option<&str>, pos: &[f64], body: &str) -> Result<(String, String), ()> {
         
         let post_id = gen_id();
-        let millis: i64 = current_time_ms() as i64;
         
         if let Err(mongo_err) = self.mongo_db.collection("posts").insert_one(doc! {
             "_id": post_id.clone(),
@@ -276,11 +277,18 @@ impl NearsayDB {
             "views": 0,
             "expiry": (today() + 7) as i64,
         }).await {
-            eprintln!("error inserting new post {}", mongo_err);
-            return Err(mongo_err);
+            eprintln!("error inserting new post: {}", mongo_err);
+            return Err(());
         }
 
-        Ok((post_id, millis))
+        const BLURB_LENGTH: usize = 10;
+        let blurb = 
+            if body.len() <= BLURB_LENGTH { body } 
+            else { &format!("{}...", body[..BLURB_LENGTH].to_string()) };
+        
+        self.cache.save_post_pt(&post_id, pos[0], pos[1], blurb).await.unwrap();
+        
+        Ok((post_id, blurb.to_string()))
     }
     
 
@@ -392,17 +400,31 @@ impl NearsayDB {
         }   
     }
 
-    pub async fn geoquery_posts(&mut self, layer: usize, query: &Rect) -> Vec<Cluster> {
-        if let Ok(Some(posts)) = self.cache.geoquery_posts(layer, query).await {
+    pub async fn geoquery_post_pts(&mut self, layer: usize, within: &Rect) -> Vec<Cluster> {
+        
+        // if cache available, get from cache
+        if let Ok(posts) = self.cache.try_get_post_pts(layer, within).await {
+            println!("cache hit", );
             return posts;
         }
 
+        println!("cache miss", );
         
-
-        vec![]
+        let mut post_docs = self.geoquery::<Post>("posts", within).await;
+        let mut res: Vec<Cluster> = vec![];
+        
+        while let Some(doc) = post_docs.try_next().await.unwrap() {
+            res.push(doc.into());
+        }
+        
+        res
     }
 
-    async fn get_pois<T>(&self, collection: &str, within: &Rect) -> Cursor<Document>
+    pub async fn geoquery_users(&mut self, within: &Rect) -> Vec<Cluster> {
+        todo!()
+    }
+
+    async fn geoquery<T>(&self, collection: &str, within: &Rect) -> Cursor<Document>
     where T: Send + Sync + POI
     {
         self.mongo_db.collection::<T>(collection)

@@ -1,11 +1,26 @@
-use std::{collections::HashMap, error::Error, usize};
+use std::{error::Error, usize};
 use redis::aio::MultiplexedConnection;
-use redis::AsyncCommands;
-use redis::{geo::{Coord, Unit}, Commands};
-use serde::Serialize;
+use redis::geo::RadiusSearchResult;
+use redis::{AsyncCommands, RedisResult};
+use redis::geo::{Coord, Unit};
 
 use crate::area::Rect;
 use crate::cluster::Cluster;
+
+const FIFTY_PX_IN_METERS_AT_ZOOM_0: f64 = 3913575.848201024;
+
+const MIN_CACHED_LAYER: usize = 2;
+const MAX_CACHED_LAYER: usize = 5;
+
+/// iterator of (layer name, radius)
+fn all_layers_iter() -> impl Iterator<Item = (String, f64)> {
+    (MIN_CACHED_LAYER..=MAX_CACHED_LAYER)
+        .map(|num| (
+            format!("L{num}"), 
+            FIFTY_PX_IN_METERS_AT_ZOOM_0 / 2.0_f64.powf(num as f64)
+        ))
+        .into_iter()
+}
 
 #[derive(Debug, Clone)]
 pub struct NearsayCache {
@@ -14,7 +29,6 @@ pub struct NearsayCache {
 impl NearsayCache {
 
     pub async fn new() -> Result<Self, Box<dyn Error>> {
-        println!("creating new nearsay cache ", );
         Ok( 
             Self { 
                 r:  redis::Client::open("redis://127.0.0.1/")?
@@ -23,139 +37,147 @@ impl NearsayCache {
         )
     }
 
-    async fn save_cluster(&mut self, id: &str, cluster: &Cluster) -> Result<(), Box<dyn Error>> {
-        self.r.hset_multiple::<_, _, _, ()>(id, &[
-            ("x", format!("{}", cluster.x)), 
-            ("y", format!("{}", cluster.y)), 
-            ("size", format!("{}", cluster.size))
-        ]).await?;
+    async fn get_blurb(&mut self, cluster_id: &str) -> RedisResult<Option<String>> {
+        self.r.get(format!("{cluster_id}:blurb")).await
+    }
+    async fn set_blurb(&mut self, cluster_id: &str, blurb: &str) -> RedisResult<()> {
+        self.r.set(format!("{cluster_id}:blurb"), format!(" '{blurb}' ")).await
+    }
+    async fn try_del_blurb(&mut self, cluster_id: &str) -> bool {
+
+        for (layer, _) in all_layers_iter() {
+            let cluster_size = self.get_cluster_size(&layer, cluster_id).await;
+            
+            if let Ok(1) = cluster_size { return false }
+        }
+        
+        let _: () = self.r.del(format!("{cluster_id}:blurb")).await.unwrap();
+
+        true
+    }
+
+    async fn get_cluster_size(&mut self, layer: &str, cluster_id: &str) -> RedisResult<usize> {
+        self.r.get(format!("{layer}:{cluster_id}:size")).await
+    }
+    async fn set_cluster_size(&mut self, layer: &str, cluster_id: &str, size: usize) -> RedisResult<usize> {
+        self.r.set(format!("L{layer}:{cluster_id}:size"), size).await
+    }
+    async fn del_cluster_size(&mut self, layer: &str, cluster_id: &str) -> RedisResult<()> {
+        self.r.del(format!("{layer}:{cluster_id}:size")).await
+    }
+
+    /// note: doesn't delete shared `blurb` value!
+    async fn del_cluster(&mut self, layer: &str, cluster_id: &str) -> RedisResult<()> {
+        let _: () = self.r.zrem(layer, cluster_id).await?;
+        self.del_cluster_size(layer, cluster_id).await
+    }
+
+    pub async fn save_post_pt(&mut self, post_id: &str, x: f64, y: f64, blurb: &str) -> Result<(), ()> {
+        self.set_blurb(post_id, blurb).await.unwrap();
+        
+        let mut merged_cluster_ids = Vec::new();
+
+        for (layer, radius) in all_layers_iter() {
+            self.add_cluster(&layer, radius, post_id, x, y, &mut merged_cluster_ids).await.unwrap();
+        }
+        
+        for id in merged_cluster_ids {
+            self.try_del_blurb(&id).await;
+        }
 
         Ok(())
     }
 
-    async fn get_cluster(&mut self, id: &str) -> Result<Cluster, Box<dyn Error>> {
-        let hash: HashMap<String, String> = self.r.hgetall(id).await?;
-
-        println!("getting clusher {}", id);
-        println!("{:?}", hash);
+    async fn add_cluster(&mut self, layer: &str, radius: f64, cluster_id: &str, x: f64, y: f64, merged_cluster_ids_out: &mut Vec<String>) -> Result<(), Box<dyn Error>> {
         
-        Ok(Cluster {
-            x: hash.get("x").unwrap().parse()?,
-            y: hash.get("y").unwrap().parse()?,
-            size: hash.get("size").unwrap().parse()?,
-            blurb: None
-        })
-    }
-
-    async fn add_pt(&mut self, x: f64, y: f64, id: &str) -> Result<(), Box<dyn Error>> {
-        let mut to_delete = Vec::with_capacity(15); // initial capacity = total layers
-
-        for layer in 1..=3 {
-            self.add_cluster_to_layer(layer, &format!("cluster-l{layer}-{id}"), x, y, &mut to_delete).await?;
-        }
-        
-        for id in to_delete {
-            let _: () = self.r.del(id).await?;
-        }
-
-        Ok(())
-    }
-
-    async fn add_cluster_to_layer(&mut self, layer: usize, new_cluster_id: &str, x: f64, y: f64, to_delete: &mut Vec<String>) -> Result<(), Box<dyn Error>> {
-        
-        let (layer_name, radius) = get_layer_info(layer);
         let mut new_cluster = Cluster::new(x, y);
 
-        let nearby_cluster_ids: Vec<String> = redis::cmd("GEOSEARCH")
-            .arg(&layer_name)
-            .arg("FROMMEMBER")
-            .arg(new_cluster_id)     
+        let nearby_clusters = self.geoquery_radius(layer, x, y, radius).await?;
+
+        for (nearby_cluster_id, nearby_cluster) in nearby_clusters {
+            new_cluster.absorb(&nearby_cluster);
+            
+            self.del_cluster(layer, &nearby_cluster_id).await.unwrap();
+            
+            if !merged_cluster_ids_out.contains(&nearby_cluster_id) {
+                merged_cluster_ids_out.push(nearby_cluster_id);                         
+            }
+        }
+
+        // add cluster id to layer
+        self.r.geo_add::<_, _, ()>(layer, (Coord::lon_lat(new_cluster.y, new_cluster.x), cluster_id)).await?;
+        
+        self.set_cluster_size(layer, cluster_id, new_cluster.size).await.unwrap();
+
+        Ok(())
+    }
+
+    /// `radius` in meters
+    /// 
+    /// returns `(cluster_id, cluster)`
+    async fn geoquery_radius(&mut self, layer: &str, x: f64, y: f64, radius: f64) -> Result<Vec<(String, Cluster)>, Box<dyn Error>> {
+        let search_results: Vec<RadiusSearchResult> = redis::cmd("GEOSEARCH")
+            .arg(layer)
+            .arg("FROMLONLAT")
+            .arg(y)
+            .arg(x)
             .arg("BYRADIUS")
             .arg(radius)
             .arg(Unit::Meters)
-            .query_async::<Vec<String>>(&mut self.r).await?;
+            .arg("WITHCOORD")
+            .query_async(&mut self.r).await?;
 
-        // merge nearby clusters to new one + delete them from redis
-        for id in nearby_cluster_ids {
-            let nearby_cluster = self.get_cluster(&id).await?;
-            
-            // remove this cluster from the layer
-            let _: () = self.r.zrem(&layer_name, &id).await?; 
-            
-            // mark this cluster to be deleted later 
-            if !to_delete.contains(&id) {
-                to_delete.push(id);                         
-            }
-
-            new_cluster.merge_with(nearby_cluster);
+        let mut res = vec![];
+        for search_res in search_results {            
+            res.push((search_res.name.clone(), self.search_res_to_cluster(layer, search_res).await? ));
         }
-
-        // save new cluster to redis
-        self.r.geo_add::<_, _, ()>(layer_name, (Coord::lon_lat(new_cluster.y, new_cluster.x), new_cluster_id)).await?;
-        self.save_cluster(new_cluster_id, &new_cluster).await?;
-
-        Ok(())
+        Ok(res)
     }
 
-    /// query should be in meters
-    pub async fn geoquery_posts(&mut self, layer: usize, query: &Rect) -> Result<Option<Vec<Cluster>>, Box<dyn Error>> {
+    async fn search_res_to_cluster(&mut self, layer: &str, search_res: RadiusSearchResult) -> Result<Cluster, Box<dyn Error>> {
+        let Coord {latitude: x, longitude: y} = search_res.coord.unwrap();
         
-        let width = query.right - query.left;
-        let height = query.top - query.bottom;
-        let center_x = query.left + width / 2.0;
-        let center_y = query.bottom + height / 2.0;
+        let size = self.get_cluster_size(layer, &search_res.name).await?;
+            
+        let blurb = 
+            if size == 1 { self.get_blurb(&search_res.name).await? } 
+            else { None };
 
-        let cluster_ids = redis::cmd("GEOSEARCH")
-            .arg(&format!("layer-{layer}"))
+        Ok(Cluster {x, y, size, blurb})
+    }
+
+    /// `within` should be in meters
+    /// 
+    /// returns `(cluster_id, cluster)`
+    pub async fn try_get_post_pts(&mut self, layer: usize, within: &Rect) -> Result<Vec<Cluster>, ()> {
+        if layer < MIN_CACHED_LAYER || MAX_CACHED_LAYER < layer { return Err(()) }
+
+        let layer_name = format!("L{layer}");
+        
+        let width = within.right - within.left;
+        let height = within.top - within.bottom;
+        let center_x = within.left + width / 2.0;
+        let center_y = within.bottom + height / 2.0;
+
+        let search_results: Vec<RadiusSearchResult> = redis::cmd("GEOSEARCH")
+            .arg(&layer_name)
             .arg("FROMLONLAT")
-            .arg(center_y)     // lon
-            .arg(center_x)     // lat
+            .arg(center_y)
+            .arg(center_x)
             .arg("BYBOX")
             .arg(height)
             .arg(width)
             .arg(Unit::Meters)
-            .query_async::<Vec<String>>(&mut self.r).await?;
+            .arg("WITHCOORD")
+            .query_async(&mut self.r).await.map_err(|_| ())?;
 
-        if cluster_ids.is_empty() { return Ok(None) }
-
-        let mut clusters = Vec::with_capacity(cluster_ids.len());
-        for id in cluster_ids {
-            let mut cluster = self.get_cluster(&id).await?;
-
-            if let Ok(blurb) = self.r.hget::<_, _, String>(&id, "blurb").await {
-                cluster.blurb = Some(blurb);
-            }
-
-            clusters.push(self.get_cluster(&id).await?);
+        let mut res = vec![];
+        for search_res in search_results {            
+            res.push(
+                self.search_res_to_cluster(&layer_name, search_res).await.map_err(|_| ())? 
+            );
         }
-        
-        Ok(Some(clusters))
+        Ok(res)
     }
-
-    // pub fn insert_post(&mut self, x: f64, y: f64, id: &str, blurb: &str) -> Result<(), Box<dyn Error>> {
-    //     self.r.hset::<_, _, _, ()>(id, "blurb", blurb)?;
-
-    //     self.add_pt(x, y, id)?;
-
-    //     Ok(())
-    // }
-
-    // pub fn get_post(&mut self, id: &str) -> Result<(), Box<dyn Error>> {
-    //     // self.r.hset::<_, _, _, ()>(id, "blurb", blurb)?;
-
-    //     // self.add_pt(x, y, id)?;
-
-    //     // Ok(())
-    // }
-
 }
 
-const FIFTY_PX_IN_METERS_AT_ZOOM_0: f64 = 3913575.848201024;
-
-/// returns `(layer name, cluster radius in km)` 
-fn get_layer_info(layer: usize) -> (String, f64) {
-    (
-        format!("layer-{layer}"),
-        FIFTY_PX_IN_METERS_AT_ZOOM_0 / 2.0_f64.powf(layer as f64)
-    )
-}

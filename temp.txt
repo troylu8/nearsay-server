@@ -1,80 +1,164 @@
-  
+use std::{collections::HashMap, error::Error, usize};
+use redis::aio::MultiplexedConnection;
+use redis::AsyncCommands;
+use redis::{geo::{Coord, Unit}, Commands};
+use serde::Serialize;
 
-// const BOUND: Rect<f64> = Rect {top: 90.0, bottom: -90.0, left: -180.0, right: 180.0 };
-// pub const BOUND: Rect<f64> = Rect {top: 10.0, bottom: 0.0, left: 0.0, right: 10.0 };
+use crate::area::Rect;
 
-   // fn to_tile_reg(snapped_view: &Rect<f64>) -> TileRegion {
-//     let (depth, tile_size) = get_depth_and_tile_size(&snapped_view);
-
-//     let bottom = ((snapped_view.bottom - BOUND.bottom) / tile_size).floor() as usize;
-//     let left = ((snapped_view.left - BOUND.left) / tile_size).floor() as usize;
-//     let top = ((snapped_view.top - BOUND.bottom) / tile_size - 1.0).ceil() as usize;
-//     let right = ((snapped_view.right - BOUND.left) / tile_size - 1.0).ceil() as usize;
-
-//     TileRegion {
-//         depth, 
-//         tile_size,
-//         tile_region: Rect { top, bottom, left, right }
-//     }
-// }
-
-// fn get_depth_and_tile_size(rect: &Rect<f64>) -> (usize, f64) {
-//     let mut depth = 0;
-//     let mut tile_size = BOUND.right - BOUND.left;
-
-//     let rect_size = (rect.right - rect.left).min(rect.top - rect.bottom);
-
-//     while rect_size < tile_size {
-//         tile_size /= 2.0;
-//         depth += 1;
-//     }
-
-//     (depth, tile_size)
-// } 
-
-   
-   let timestamps = {
-                let mut map = HashMap::with_capacity(timestamps.len());
-                for (id, time) in timestamps {
-                    map.insert(id, time);
-                }
-                map
-            };
-   
-    get_depth(Rect {top: 5.0, bottom: 0.0, left: 5.0, right: 10.0});
-    get_depth(Rect {top: 3.0, bottom: -3.0, left: -3.0, right: 3.0});
-    get_depth(Rect {top: 10.0, bottom: 0.0, left: -10.0, right: 10.0});
-    get_depth(Rect {top: 1.0, bottom: -9.0, left: -1.0, right: 1.0});
-
-    pub fn intersects<T: Ord>(a: Rect<T>, b: Rect<T>) -> bool {
-    a.left.max(b.left) < a.right.min(b.right) && a.bottom.max(b.bottom) < a.top.min(b.top)
+#[derive(Debug, Clone)]
+pub struct NearsayCache {
+    r: MultiplexedConnection,
 }
+impl NearsayCache {
 
-pub fn get_rooms(prev_snapped: Rect<f64>, curr_snapped: Rect<f64>) -> HashSet<String> {
-    let curr = to_tile_reg(curr_snapped);
-    let prev = to_tile_reg(prev_snapped);
-    
-    // if depth different
-    
-    for x in (curr.region.left ..= curr.region.right).map(|x| (x as f64) * curr.tile_size + BOUND.left) {
-        for y in (curr.region.bottom+1 ..= curr.region.top+1).map(|y| (y as f64) * curr.tile_size + BOUND.bottom) {
-            // res.insert( format!("{curr.depth}:{x}:{y}") );
-
-            format!("{}:{}:{}", 
-                curr.depth,
-                (x as f64) * curr.tile_size + BOUND.left,
-                (y as f64 + 1.0) * curr.tile_size + BOUND.bottom
-            );
-        }
+    pub async fn new() -> Result<Self, Box<dyn Error>> {
+        println!("creating new nearsay cache ", );
+        Ok( 
+            Self { 
+                r:  redis::Client::open("redis://127.0.0.1/")?
+                    .get_multiplexed_async_connection().await?
+            } 
+        )
     }
 
-        update_rooms(
-        None,
-        Rect {bottom: 0.0, top: 3.0, left: 0.0, right: 3.0},
-        rooms
-    );
-    update_rooms(
-        Some(Rect {bottom: 0.0, top: 3.0, left: 0.0, right: 3.0}),
-        Rect {bottom: 2.0, top: 5.0, left: 2.0, right: 5.0},
-        rooms
-    );
+    async fn insert_pt(&mut self, id: &str, pt: &Cluster) -> Result<(), Box<dyn Error>> {
+        // see which panels intersect with this pt
+        
+        // add to each panel
+
+        self.r.hset_multiple::<_, _, _, ()>(id, &[
+            ("x", format!("{}", pt.x)), 
+            ("y", format!("{}", pt.y)), 
+            ("size", format!("{}", pt.size))
+        ]).await?;
+
+        Ok(())
+    }
+
+    async fn get_cluster(&mut self, id: &str) -> Result<Cluster, Box<dyn Error>> {
+        let hash: HashMap<String, String> = self.r.hgetall(id).await?;
+
+        println!("getting clusher {}", id);
+        println!("{:?}", hash);
+        
+        Ok(Cluster {
+            x: hash.get("x").unwrap().parse()?,
+            y: hash.get("y").unwrap().parse()?,
+            size: hash.get("size").unwrap().parse()?,
+            blurb: None
+        })
+    }
+
+    async fn add_pt(&mut self, x: f64, y: f64, id: &str) -> Result<(), Box<dyn Error>> {
+        let mut to_delete = Vec::with_capacity(15); // initial capacity = total layers
+
+        for layer in 1..=3 {
+            self.add_cluster_to_layer(layer, &format!("cluster-l{layer}-{id}"), x, y, &mut to_delete).await?;
+        }
+        
+        for id in to_delete {
+            let _: () = self.r.del(id).await?;
+        }
+
+        Ok(())
+    }
+
+    async fn add_cluster_to_layer(&mut self, layer: usize, new_cluster_id: &str, x: f64, y: f64, to_delete: &mut Vec<String>) -> Result<(), Box<dyn Error>> {
+        
+        let (layer_name, radius) = get_layer_info(layer);
+        let mut new_cluster = Cluster::new(x, y);
+
+        let nearby_cluster_ids: Vec<String> = redis::cmd("GEOSEARCH")
+            .arg(&layer_name)
+            .arg("FROMMEMBER")
+            .arg(new_cluster_id)     
+            .arg("BYRADIUS")
+            .arg(radius)
+            .arg(Unit::Meters)
+            .query_async::<Vec<String>>(&mut self.r).await?;
+
+        // merge nearby clusters to new one + delete them from redis
+        for id in nearby_cluster_ids {
+            let nearby_cluster = self.get_cluster(&id).await?;
+            
+            // remove this cluster from the layer
+            let _: () = self.r.zrem(&layer_name, &id).await?; 
+            
+            // mark this cluster to be deleted later 
+            if !to_delete.contains(&id) {
+                to_delete.push(id);                         
+            }
+
+            new_cluster.merge_with(nearby_cluster);
+        }
+
+        // save new cluster to redis
+        self.r.geo_add::<_, _, ()>(layer_name, (Coord::lon_lat(new_cluster.y, new_cluster.x), new_cluster_id)).await?;
+        self.insert_pt(new_cluster_id, &new_cluster).await?;
+
+        Ok(())
+    }
+
+    /// query should be in meters
+    pub async fn geoquery_posts(&mut self, layer: usize, query: &Rect) -> Result<Option<Vec<Cluster>>, Box<dyn Error>> {
+        
+        let width = query.right - query.left;
+        let height = query.top - query.bottom;
+        let center_x = query.left + width / 2.0;
+        let center_y = query.bottom + height / 2.0;
+
+        let cluster_ids = redis::cmd("GEOSEARCH")
+            .arg(&format!("layer-{layer}"))
+            .arg("FROMLONLAT")
+            .arg(center_y)     // lon
+            .arg(center_x)     // lat
+            .arg("BYBOX")
+            .arg(height)
+            .arg(width)
+            .arg(Unit::Meters)
+            .query_async::<Vec<String>>(&mut self.r).await?;
+
+        if cluster_ids.is_empty() { return Ok(None) }
+
+        let mut clusters = Vec::with_capacity(cluster_ids.len());
+        for id in cluster_ids {
+            let mut cluster = self.get_cluster(&id).await?;
+
+            if let Ok(blurb) = self.r.hget::<_, _, String>(&id, "blurb").await {
+                cluster.blurb = Some(blurb);
+            }
+
+            clusters.push(self.get_cluster(&id).await?);
+        }
+        
+        Ok(Some(clusters))
+    }
+
+    // pub fn insert_post(&mut self, x: f64, y: f64, id: &str, blurb: &str) -> Result<(), Box<dyn Error>> {
+    //     self.r.hset::<_, _, _, ()>(id, "blurb", blurb)?;
+
+    //     self.add_pt(x, y, id)?;
+
+    //     Ok(())
+    // }
+
+    // pub fn get_post(&mut self, id: &str) -> Result<(), Box<dyn Error>> {
+    //     // self.r.hset::<_, _, _, ()>(id, "blurb", blurb)?;
+
+    //     // self.add_pt(x, y, id)?;
+
+    //     // Ok(())
+    // }
+
+}
+
+const FIFTY_PX_IN_METERS_AT_ZOOM_0: f64 = 3913575.848201024;
+
+/// returns `(layer name, cluster radius in km)` 
+fn get_layer_info(layer: usize) -> (String, f64) {
+    (
+        format!("layer-{layer}"),
+        FIFTY_PX_IN_METERS_AT_ZOOM_0 / 2.0_f64.powf(layer as f64)
+    )
+}
