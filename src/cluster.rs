@@ -3,6 +3,17 @@ use mongodb::bson::Document;
 use redis::{aio::MultiplexedConnection, geo::{Coord, RadiusSearchResult}, AsyncCommands};
 use serde::Serialize;
 
+const FIFTY_PX_IN_METERS_AT_ZOOM_0: f64 = 3913575.848201024;
+
+
+pub fn get_cluster_radius_meters(zoom_level: usize) -> f64 {
+    FIFTY_PX_IN_METERS_AT_ZOOM_0 / 2.0_f64.powf(zoom_level as f64)
+}
+pub fn get_cluster_radius_degrees(zoom_level: usize) -> f64 {
+    todo!()
+}
+//TODO deleting posts creates "tombstone poi" that just says "post deleted"
+// truly delete at clear_old_posts
 
 #[derive(Debug, Serialize, Clone, PartialEq)]
 pub struct Cluster {

@@ -5,9 +5,7 @@ use redis::{AsyncCommands, RedisResult};
 use redis::geo::{Coord, Unit};
 
 use crate::area::Rect;
-use crate::cluster::Cluster;
-
-const FIFTY_PX_IN_METERS_AT_ZOOM_0: f64 = 3913575.848201024;
+use crate::cluster::{get_cluster_radius_meters, Cluster};
 
 const MIN_CACHED_LAYER: usize = 2;
 const MAX_CACHED_LAYER: usize = 5;
@@ -17,75 +15,58 @@ fn all_layers_iter() -> impl Iterator<Item = (String, f64)> {
     (MIN_CACHED_LAYER..=MAX_CACHED_LAYER)
         .map(|num| (
             format!("L{num}"), 
-            FIFTY_PX_IN_METERS_AT_ZOOM_0 / 2.0_f64.powf(num as f64)
+            get_cluster_radius_meters(num)
         ))
         .into_iter()
 }
 
 #[derive(Debug, Clone)]
-pub struct NearsayCache {
-    r: MultiplexedConnection,
+pub struct MapLayersCache {
+    redis: MultiplexedConnection,
 }
-impl NearsayCache {
+impl MapLayersCache {
 
     pub async fn new() -> Result<Self, Box<dyn Error>> {
         Ok( 
             Self { 
-                r:  redis::Client::open("redis://127.0.0.1/")?
-                    .get_multiplexed_async_connection().await?
-            } 
+                redis:  redis::Client::open("redis://localhost:5001")?
+                        .get_multiplexed_async_connection().await?
+            }
         )
     }
 
     async fn get_blurb(&mut self, cluster_id: &str) -> RedisResult<Option<String>> {
-        self.r.get(format!("{cluster_id}:blurb")).await
+        self.redis.get(format!("blurb:{cluster_id}")).await
     }
     async fn set_blurb(&mut self, cluster_id: &str, blurb: &str) -> RedisResult<()> {
-        self.r.set(format!("{cluster_id}:blurb"), format!(" '{blurb}' ")).await
+        self.redis.set(format!("blurb:{cluster_id}"), format!(" '{blurb}' ")).await
     }
     async fn try_del_blurb(&mut self, cluster_id: &str) -> bool {
-
         for (layer, _) in all_layers_iter() {
             let cluster_size = self.get_cluster_size(&layer, cluster_id).await;
             
             if let Ok(1) = cluster_size { return false }
         }
         
-        let _: () = self.r.del(format!("{cluster_id}:blurb")).await.unwrap();
+        let _: () = self.redis.del(format!("blurb:{cluster_id}")).await.unwrap();
 
         true
     }
 
     async fn get_cluster_size(&mut self, layer: &str, cluster_id: &str) -> RedisResult<usize> {
-        self.r.get(format!("{layer}:{cluster_id}:size")).await
+        self.redis.get(format!("size:{layer}:{cluster_id}")).await
     }
-    async fn set_cluster_size(&mut self, layer: &str, cluster_id: &str, size: usize) -> RedisResult<usize> {
-        self.r.set(format!("L{layer}:{cluster_id}:size"), size).await
+    async fn set_cluster_size(&mut self, layer: &str, cluster_id: &str, size: usize) -> RedisResult<()> {
+        self.redis.set(format!("size:{layer}:{cluster_id}"), size).await
     }
     async fn del_cluster_size(&mut self, layer: &str, cluster_id: &str) -> RedisResult<()> {
-        self.r.del(format!("{layer}:{cluster_id}:size")).await
+        self.redis.del(format!("size:{layer}:{cluster_id}")).await
     }
 
     /// note: doesn't delete shared `blurb` value!
     async fn del_cluster(&mut self, layer: &str, cluster_id: &str) -> RedisResult<()> {
-        let _: () = self.r.zrem(layer, cluster_id).await?;
+        let _: () = self.redis.zrem(layer, cluster_id).await?;
         self.del_cluster_size(layer, cluster_id).await
-    }
-
-    pub async fn save_post_pt(&mut self, post_id: &str, x: f64, y: f64, blurb: &str) -> Result<(), ()> {
-        self.set_blurb(post_id, blurb).await.unwrap();
-        
-        let mut merged_cluster_ids = Vec::new();
-
-        for (layer, radius) in all_layers_iter() {
-            self.add_cluster(&layer, radius, post_id, x, y, &mut merged_cluster_ids).await.unwrap();
-        }
-        
-        for id in merged_cluster_ids {
-            self.try_del_blurb(&id).await;
-        }
-
-        Ok(())
     }
 
     async fn add_cluster(&mut self, layer: &str, radius: f64, cluster_id: &str, x: f64, y: f64, merged_cluster_ids_out: &mut Vec<String>) -> Result<(), Box<dyn Error>> {
@@ -105,7 +86,7 @@ impl NearsayCache {
         }
 
         // add cluster id to layer
-        self.r.geo_add::<_, _, ()>(layer, (Coord::lon_lat(new_cluster.y, new_cluster.x), cluster_id)).await?;
+        self.redis.geo_add::<_, _, ()>(layer, (Coord::lon_lat(new_cluster.y, new_cluster.x), cluster_id)).await?;
         
         self.set_cluster_size(layer, cluster_id, new_cluster.size).await.unwrap();
 
@@ -125,7 +106,7 @@ impl NearsayCache {
             .arg(radius)
             .arg(Unit::Meters)
             .arg("WITHCOORD")
-            .query_async(&mut self.r).await?;
+            .query_async(&mut self.redis).await?;
 
         let mut res = vec![];
         for search_res in search_results {            
@@ -146,7 +127,7 @@ impl NearsayCache {
         Ok(Cluster {x, y, size, blurb})
     }
 
-    /// `within` should be in meters
+    /// `within` should be in degrees
     /// 
     /// returns `(cluster_id, cluster)`
     pub async fn try_get_post_pts(&mut self, layer: usize, within: &Rect) -> Result<Vec<Cluster>, ()> {
@@ -169,7 +150,9 @@ impl NearsayCache {
             .arg(width)
             .arg(Unit::Meters)
             .arg("WITHCOORD")
-            .query_async(&mut self.r).await.map_err(|_| ())?;
+            .query_async(&mut self.redis).await.map_err(|_| ())?;
+        
+        println!("{:?}", search_results.len());
 
         let mut res = vec![];
         for search_res in search_results {            
@@ -178,6 +161,31 @@ impl NearsayCache {
             );
         }
         Ok(res)
+    }
+
+    pub async fn save_post_pt(&mut self, post_id: &str, x: f64, y: f64, blurb: &str) -> Result<(), ()> {
+        
+        let mut merged_cluster_ids = Vec::new();
+
+        for (layer, radius) in all_layers_iter() {
+            self.add_cluster(&layer, radius, post_id, x, y, &mut merged_cluster_ids).await.unwrap();
+        }
+        
+        // if didnt merge with anyone, save blurb
+        if merged_cluster_ids.is_empty() {
+            self.set_blurb(post_id, blurb).await.unwrap();
+        }
+        else {
+            for id in merged_cluster_ids {
+                self.try_del_blurb(&id).await;
+            }
+        }
+
+        Ok(())
+    }
+
+    pub async fn flush_all(&mut self) -> RedisResult<()> {
+        redis::cmd("FLUSHALL").exec_async(&mut self.redis).await
     }
 }
 

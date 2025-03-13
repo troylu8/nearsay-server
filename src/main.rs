@@ -14,7 +14,7 @@ mod types;
 mod cache;
 mod cluster;
 mod db;
-mod clear_old_posts;
+mod nightly_cleanup;
 mod endpoints;
 mod socket;
 mod auth;
@@ -52,10 +52,10 @@ async fn main() {
 
     let mut nearsay_db = NearsayDB::new().await;
 
-    // let (post_id, ..) = nearsay_db.insert_post(None, &[7.0, 7.0], "first post").await.unwrap();
-    // println!("inserted post {}", post_id);
-    // let (post_id, ..) = nearsay_db.insert_post(None, &[7.0, 7.0], "second post long body").await.unwrap();
-    // println!("inserted post {}", post_id);
+    let (post_id, ..) = nearsay_db.insert_post(None, &[7.0, 7.0], "??????? ").await.unwrap();
+    println!("inserted post {}", post_id);
+    let (post_id, ..) = nearsay_db.insert_post(None, &[7.0, 7.0], "second post long body").await.unwrap();
+    println!("inserted post {}", post_id);
     let (post_id, ..) = nearsay_db.insert_post(None, &[70.0, 70.0], "faraway post").await.unwrap();
     println!("inserted post {}", post_id);
 

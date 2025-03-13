@@ -2,28 +2,29 @@
 use bcrypt::{hash, DEFAULT_COST};
 use futures::TryStreamExt;
 use mongodb::{ 
-    bson::{bson, doc, Document}, error::{Error as MongoError, ErrorKind, WriteError, WriteFailure}, options::Hint, results::UpdateResult, Client, Cursor, Database
+    bson::{bson, doc, Document}, error::{Error as MongoError, ErrorKind, WriteError, WriteFailure}, options::Hint, results::{DeleteResult, UpdateResult}, Client, Cursor, Database
 };
-use nearsay_server::{current_time_ms, NearsayError};
+use nearsay_server::{clone_into_closure, current_time_ms, NearsayError};
 use serde::{de::DeserializeOwned, Deserialize};
+use tokio_cron_scheduler::{Job, JobScheduler};
 
-use crate::{area::Rect, cache::NearsayCache, clear_old_posts::{self, today}, cluster::Cluster, types::{Guest, Post, User, UserType, Vote, VoteKind, POI}};
+use crate::{area::Rect, cache::MapLayersCache, cluster::{cluster, Cluster}, nightly_cleanup::{self, today}, types::{get_blurb, Guest, Post, User, UserType, Vote, VoteKind, POI}};
 
 
 
 #[derive(Clone)]
 pub struct NearsayDB {
-    cache: NearsayCache,
+    cache: MapLayersCache,
     mongo_db: Database,
 }
 impl NearsayDB {
     pub async fn new() -> Self {
         let mongo_db = Client::with_uri_str("mongodb://localhost:27017").await.unwrap().database("nearsay");
-        
-        clear_old_posts::start_task(mongo_db.clone()).await.unwrap();
-        println!("creating new nearsay db", );
+        let nearsay_db = Self { cache: MapLayersCache::new().await.unwrap(), mongo_db };
 
-        Self { cache: NearsayCache::new().await.unwrap(),  mongo_db }
+        nearsay_db.clone().start_nightly_cleanup_job().await;
+
+        nearsay_db
     }
 
     pub async fn get<T>(&self, collection: &str, id: &str) -> Result<Option<T>, ()> 
@@ -54,6 +55,47 @@ impl NearsayDB {
             },
             Ok(_) => Ok(())
         }
+    }
+
+    /// moves self into a closure, so requires ownership
+    async fn start_nightly_cleanup_job(self) {
+
+        let sched = JobScheduler::new().await.unwrap();
+
+        sched.add(
+            // run every day at 04:00
+            Job::new_async("0 0 4 * * *", 
+                move |_, _| {
+                    let mut nearsay_db = self.clone();
+                    Box::pin(
+                        async move {
+                            nearsay_db.run_nightly_cleanup().await.unwrap()
+                        } 
+                    )
+                }
+            ).unwrap()
+        ).await.unwrap();
+
+        sched.start().await.unwrap();
+    }
+    async fn run_nightly_cleanup(&mut self) -> Result<(), mongodb::error::Error> {
+        let delete_old_posts_res = 
+            self.mongo_db.collection::<Document>("posts")
+            .delete_many(doc! { "expiry": {"$lt": today() as i32} })
+            .await?;
+        println!("delete old posts result: {:?}", delete_old_posts_res);
+        
+        self.cache.flush_all().await.unwrap();
+        println!("cleared map layers cache");
+        
+        let mut all_posts = self.mongo_db.collection::<Post>("posts").find(doc! {}).await?;
+        
+        while let Some(post) = all_posts.try_next().await.unwrap() {
+            self.cache.save_post_pt(&post._id, post.pos[0], post.pos[1], &get_blurb(&post.body)).await.unwrap();
+        }
+        println!("added all posts back into cache");
+        
+        Ok(())
     }
 
     pub async fn get_user_from_username(&self, username: &str) -> Result<Option<User>, ()> {
@@ -281,14 +323,11 @@ impl NearsayDB {
             return Err(());
         }
 
-        const BLURB_LENGTH: usize = 10;
-        let blurb = 
-            if body.len() <= BLURB_LENGTH { body } 
-            else { &format!("{}...", body[..BLURB_LENGTH].to_string()) };
+        let blurb = get_blurb(body);
         
-        self.cache.save_post_pt(&post_id, pos[0], pos[1], blurb).await.unwrap();
+        self.cache.save_post_pt(&post_id, pos[0], pos[1], &blurb).await.unwrap();
         
-        Ok((post_id, blurb.to_string()))
+        Ok((post_id, blurb))
     }
     
 
@@ -416,8 +455,8 @@ impl NearsayDB {
         while let Some(doc) = post_docs.try_next().await.unwrap() {
             res.push(doc.into());
         }
-        
-        res
+
+        cluster(&res[..], 1.0) //TODO 
     }
 
     pub async fn geoquery_users(&mut self, within: &Rect) -> Vec<Cluster> {

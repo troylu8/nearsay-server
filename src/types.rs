@@ -32,6 +32,13 @@ impl POI for Post {
     }
 }
 
+pub fn get_blurb(post_body: &str) -> String {
+    const BLURB_LENGTH: usize = 10;
+    
+    if post_body.len() <= BLURB_LENGTH { post_body.to_string() } 
+    else { format!("{}...", post_body[..BLURB_LENGTH].to_string()) }
+}
+
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct User {
