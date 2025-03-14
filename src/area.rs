@@ -1,18 +1,11 @@
 use mongodb::bson::{doc, Bson, Document};
 use serde::{Serialize, Deserialize};
 
-#[derive(Serialize, Deserialize, Debug)]
-pub struct TileRegion {
-    pub depth: usize,
-    pub area: Rect
+pub const WORLD_BOUND: usize = 180;
+pub fn get_tile_size(layer: usize, view: &Rect) -> f64 {
+    (WORLD_BOUND * 2) as f64 / 2.0_f64.powf(layer as f64) 
 }
-impl TileRegion {
-    pub const BOUND: usize = 180;
 
-    pub fn get_tile_size(&self) -> f64 {
-        (TileRegion::BOUND * 2) as f64 / 2.0_f64.powf(self.depth as f64) 
-    }
-}
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Rect { pub top: f64, pub bottom: f64, pub left: f64, pub right: f64 }

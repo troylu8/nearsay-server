@@ -1,16 +1,24 @@
 
+use std::time::SystemTime;
+
 use bcrypt::{hash, DEFAULT_COST};
 use futures::TryStreamExt;
 use mongodb::{ 
     bson::{bson, doc, Document}, error::{Error as MongoError, ErrorKind, WriteError, WriteFailure}, options::Hint, results::{DeleteResult, UpdateResult}, Client, Cursor, Database
 };
-use nearsay_server::{clone_into_closure, current_time_ms, NearsayError};
+use nearsay_server::NearsayError;
 use serde::{de::DeserializeOwned, Deserialize};
 use tokio_cron_scheduler::{Job, JobScheduler};
 
-use crate::{area::Rect, cache::MapLayersCache, cluster::{cluster, Cluster}, nightly_cleanup::{self, today}, types::{get_blurb, Guest, Post, User, UserType, Vote, VoteKind, POI}};
+use crate::{area::Rect, cache::MapLayersCache, cluster::{cluster, get_cluster_radius_degrees, Cluster}, types::{get_blurb, Guest, Post, User, UserType, Vote, VoteKind, POI}};
 
+const DEEPEST_ZOOM_LEVEL: usize = 18;
 
+/// returns # of days since the epoch
+fn today() -> u64 {
+    SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap()
+        .as_secs() / 60 / 60 / 24
+}
 
 #[derive(Clone)]
 pub struct NearsayDB {
@@ -288,9 +296,12 @@ impl NearsayDB {
         }
     }
 
-    pub async fn delete_post(&self, post_id: &str) -> Result<(), ()> {
+    pub async fn delete_post(&mut self, post_id: &str) -> Result<(), ()> {
         self.delete("posts", post_id).await?;
 
+        // delete blurb from cache
+        self.cache.del_blurb(post_id).await.map_err(|_| ())?;
+        
         // delete post votes
         match 
             self.mongo_db.collection::<Document>("votes")
@@ -441,7 +452,6 @@ impl NearsayDB {
 
     pub async fn geoquery_post_pts(&mut self, layer: usize, within: &Rect) -> Vec<Cluster> {
         
-        // if cache available, get from cache
         if let Ok(posts) = self.cache.try_get_post_pts(layer, within).await {
             println!("cache hit", );
             return posts;
@@ -456,7 +466,9 @@ impl NearsayDB {
             res.push(doc.into());
         }
 
-        cluster(&res[..], 1.0) //TODO 
+        // don't cluster if zoomed all the way in
+        if layer == DEEPEST_ZOOM_LEVEL { res }
+        else { cluster(&res[..], get_cluster_radius_degrees(layer))  }
     }
 
     pub async fn geoquery_users(&mut self, within: &Rect) -> Vec<Cluster> {

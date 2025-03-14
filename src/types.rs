@@ -5,7 +5,6 @@ pub trait POI {
     fn get_poi_projection() -> Document;
 }
 
-
 #[derive(Serialize, Deserialize, Clone, Debug)]
 #[allow(non_snake_case)]
 pub struct Post {
@@ -24,8 +23,6 @@ impl POI for Post {
         doc! {
             "$project": {
                 "pos": 1,
-                "kind": "post",
-
                 "blurb": { "$substrCP": [ "$body", 0, 10 ]},
             }
         }

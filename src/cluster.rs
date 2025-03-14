@@ -3,10 +3,9 @@ use mongodb::bson::Document;
 use redis::{aio::MultiplexedConnection, geo::{Coord, RadiusSearchResult}, AsyncCommands};
 use serde::Serialize;
 
-const FIFTY_PX_IN_METERS_AT_ZOOM_0: f64 = 3913575.848201024;
-
-
 pub fn get_cluster_radius_meters(zoom_level: usize) -> f64 {
+    const FIFTY_PX_IN_METERS_AT_ZOOM_0: f64 = 3913575.848201024;
+
     FIFTY_PX_IN_METERS_AT_ZOOM_0 / 2.0_f64.powf(zoom_level as f64)
 }
 pub fn get_cluster_radius_degrees(zoom_level: usize) -> f64 {
@@ -17,33 +16,41 @@ pub fn get_cluster_radius_degrees(zoom_level: usize) -> f64 {
 
 #[derive(Debug, Serialize, Clone, PartialEq)]
 pub struct Cluster {
-    pub x: f64,
-    pub y: f64,
+    pub pos: (f64, f64),
     pub size: usize,
 
+    pub id: Option<String>,
     pub blurb: Option<String>,
 }
 impl Cluster {
 
+    pub fn x(&self) -> f64 { self.pos.0 }
+    pub fn y(&self) -> f64 { self.pos.1 }
+
     pub fn new(x: f64, y: f64) -> Self {
         Self {
-            x, y,
+            pos: (x, y),
             size: 1,
-            blurb: None
+            blurb: None,
+            id: None,
         }
     }
 
     pub fn new_with_blurb(x: f64, y: f64, blurb: String) -> Self {
         Self {
-            x, y,
+            pos: (x, y),
             size: 1,
-            blurb: Some(blurb)
+            id: None,
+            blurb: Some(blurb),
         }
     }
 
     pub fn absorb(&mut self, other: &Cluster) {
-        self.x = (self.size as f64 * self.x + other.size as f64 * other.x) / (self.size + other.size) as f64;
-        self.y = (self.size as f64 * self.y + other.size as f64 * other.y) / (self.size + other.size) as f64;
+        self.pos = 
+        (
+            (self.size as f64 * self.x() + other.size as f64 * other.x()) / (self.size + other.size) as f64,
+            (self.size as f64 * self.y() + other.size as f64 * other.y()) / (self.size + other.size) as f64
+        );
         
         self.size += other.size;
 
@@ -51,10 +58,10 @@ impl Cluster {
     }
 
     pub fn dist_to(&self, other: &Cluster) -> f64 {
-        ((self.x - other.x).powf(2.0) + (self.y - other.y).powf(2.0)).sqrt()
+        ((self.x() - other.x()).powf(2.0) + (self.y() - other.y()).powf(2.0)).sqrt()
     }
     pub fn dist_to_pt(&self, (x, y): (f64, f64)) -> f64 {
-        ((self.x - x).powf(2.0) + (self.y - y).powf(2.0)).sqrt()
+        ((self.x() - x).powf(2.0) + (self.y() - y).powf(2.0)).sqrt()
     }
 }
 
@@ -65,14 +72,14 @@ impl From<Document> for Cluster {
         else { panic!("'pos' array doesn't have enough elements") };
         
         Self {
-            x: x.as_f64().unwrap(),
-            y: y.as_f64().unwrap(),
+            pos: (x.as_f64().unwrap(), y.as_f64().unwrap()),
             size: doc.get_i32("size").unwrap() as usize,
+            id: None,
             blurb: 
                 match doc.get_str("blurb") {
                     Err(_) => None,
                     Ok(blurb) => Some(blurb.to_string()),
-                }
+                },
         }
     }
 }
@@ -87,8 +94,8 @@ pub fn cluster(pts: &[Cluster], radius: f64) -> Vec<Cluster> {
     // sort pois into grid of clusters or pois
     for new_pt in pts {
         let bucket = (
-            (new_pt.x / radius).floor() as i32,
-            (new_pt.y / radius).floor() as i32,
+            (new_pt.x() / radius).floor() as i32,
+            (new_pt.y() / radius).floor() as i32,
         );
 
         match grid.get_mut(&bucket) {
@@ -180,8 +187,8 @@ mod tests {
         
         let res = cluster(pts, 1.0);
         assert_eq!(2, res.len());
-        assert_eq!(true, res.contains(&Cluster { x: 0.5, y: 0.0, size: 2, blurb: None }));
-        assert_eq!(true, res.contains(&Cluster { x: 2.5, y: 0.0, size: 2, blurb: None }));
+        assert_eq!(true, res.contains(&Cluster { pos: (0.5, 0.0), size: 2, id: None, blurb: None }));
+        assert_eq!(true, res.contains(&Cluster { pos: (2.5, 0.0), size: 2,  id: None, blurb: None }));
     }
     
     #[test]
@@ -193,7 +200,7 @@ mod tests {
             
         let res = cluster(pts, 1.0);
         assert_eq!(1, res.len());
-        assert_eq!(true, res.contains(&Cluster { x: 1.0, y: 1.0, size: 2, blurb: None }));
+        assert_eq!(true, res.contains(&Cluster { pos: (1.0, 1.0), size: 2, id: None, blurb: None }));
     }
 
     #[test]
@@ -206,7 +213,7 @@ mod tests {
             
         let res = cluster(pts, 1.0);
         assert_eq!(1, res.len());
-        assert_eq!(true, res.contains(&Cluster { x: 0.9, y: 0.9, size: 3, blurb: None }));
+        assert_eq!(true, res.contains(&Cluster { pos: (0.9, 0.9), size: 3, id: None, blurb: None }));
     }
 
     #[test]
@@ -219,8 +226,8 @@ mod tests {
             
         let res = cluster(pts, 2.0);
         assert_eq!(2, res.len());
-        assert_eq!(true, res.contains(&Cluster { x: 0.5, y: 0.5, size: 2, blurb: None }));
-        assert_eq!(true, res.contains(&Cluster { x: 9.0, y: 9.0, size: 1, blurb: Some("blurb a".to_string()) }));
+        assert_eq!(true, res.contains(&Cluster { pos: (0.5, 0.5), size: 2, id: None, blurb: None }));
+        assert_eq!(true, res.contains(&Cluster { pos: (9.0, 9.0), size: 1, id: None, blurb: Some("blurb a".to_string()) }));
 
     }
 }

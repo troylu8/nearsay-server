@@ -4,16 +4,17 @@ use futures::TryStreamExt;
 use hmac::Hmac;
 use mongodb::bson::{doc, Document};
 use serde::{Deserialize, Serialize};
-use nearsay_server::clone_into_closure;
+use nearsay_server::{clone_into_closure, clone_into_closure_mut};
 use serde_json::json;
 use sha2::Sha256;
 use socketioxide::extract::{AckSender, Data, SocketRef};
 
-use crate::{area::{Rect, TileRegion}, auth::{authenticate_jwt, create_jwt, verify_password, JWTPayload}, cluster::Cluster, db::{gen_id, NearsayDB}, types::{Post, User, POI}};
+use crate::{area::{get_tile_size, Rect, WORLD_BOUND}, auth::{authenticate_jwt, create_jwt, verify_password, JWTPayload}, cluster::Cluster, db::{gen_id, NearsayDB}, types::{Post, User, POI}};
 
 #[derive(Deserialize, Debug)]
 struct ViewShiftData {
-    view: [Option<TileRegion>; 2],
+    layer: usize,
+    view: [Option<Rect>; 2]
 }
 
 #[derive(Serialize, Default, Debug)]
@@ -282,16 +283,16 @@ pub fn on_socket_connect(client_socket: SocketRef, db: &NearsayDB, key: &Hmac<Sh
 
     client_socket.on(
         "view-shift",
-        clone_into_closure! {
+        clone_into_closure_mut! {
             (db)
-            |client_socket: SocketRef, Data(ViewShiftData {view}), ack: AckSender| async move {
+            |client_socket: SocketRef, Data(ViewShiftData {layer, view}), ack: AckSender| async move {
                 let mut resp = ViewShiftResponse::default();
-                
-                for region in view {
-                    if let Some(region) = region {
-                        update_rooms(&client_socket, &region);
-                        append_in_region::<User>(&db, "users", &region, &mut resp.users).await;
-                        append_in_region::<Post>(&db, "posts", &region, &mut resp.posts).await;
+
+                for rect in view {
+                    if let Some(rect) = rect {
+                        update_rooms(&client_socket, layer, &rect);
+                        resp.posts.extend(db.geoquery_post_pts(layer, &rect).await);
+                        //TODO: users
                     }
                 }
     
@@ -405,25 +406,6 @@ pub fn on_socket_connect(client_socket: SocketRef, db: &NearsayDB, key: &Hmac<Sh
 
 }
 
-async fn append_in_region<T: Send + Sync + POI>(db: &NearsayDB, collection: &str, curr_region: &TileRegion, resp: &mut Vec<Cluster>) -> Option<Box<dyn std::error::Error>> {
-    
-    // let mut cursor = db.get_pois::<T>(collection, &curr_region.area, exclude).await;
-    
-    // while let Some(poi) = cursor.try_next().await.unwrap() {
-        
-    //     let has_been_updated = match timestamps.get(poi.get("_id")?.as_str()?) {
-    //         Some(prev_timestamp) => poi.get("updated")?.as_i64()? > *prev_timestamp,
-    //         None => true,
-    //     };
-    //     if has_been_updated {
-    //         resp.fresh.push(poi);
-    //     }
-    // }
-
-    // None
-    todo!()
-}
-
 
 #[derive(Debug)]
 pub enum BroadcastTargets { IncludingSelf, ExcludingSelf }
@@ -432,10 +414,10 @@ pub fn broadcast_at<T: Sized + Serialize>(io: &SocketRef, pos: [f64; 2], event: 
     let [x, y] = pos;
 
     let mut area = Rect {
-        left: -(TileRegion::BOUND as f64), 
-        right: TileRegion::BOUND as f64, 
-        top: TileRegion::BOUND as f64, 
-        bottom: -(TileRegion::BOUND as f64)
+        left: -(WORLD_BOUND as f64), 
+        right: WORLD_BOUND as f64, 
+        top: WORLD_BOUND as f64, 
+        bottom: -(WORLD_BOUND as f64)
     };
 
     let broadcast = |room: String,| {
@@ -447,7 +429,7 @@ pub fn broadcast_at<T: Sized + Serialize>(io: &SocketRef, pos: [f64; 2], event: 
     
     broadcast(get_room(0, area.left, area.bottom));
     
-    for depth in 1..=23 {
+    for layer in 1..=23 {
         
         let mid_x = (area.left + area.right) / 2.0;
         let mid_y = (area.top + area.bottom) / 2.0;
@@ -458,28 +440,28 @@ pub fn broadcast_at<T: Sized + Serialize>(io: &SocketRef, pos: [f64; 2], event: 
         if y >= mid_y { area.bottom = mid_y; }
         else { area.top = mid_y; }
 
-        broadcast(get_room(depth, area.left, area.bottom));
+        broadcast(get_room(layer, area.left, area.bottom));
     }
 }
 
 
 const SPLIT: &str = " : ";
 
-pub fn update_rooms(client_socket: &SocketRef, tilereg: &TileRegion)  {
+pub fn update_rooms(client_socket: &SocketRef, layer: usize, area: &Rect)  {
 
     client_socket.leave_all().unwrap();
 
-    let tile_size = tilereg.get_tile_size();
-    let width = ((tilereg.area.right - tilereg.area.left) / tile_size).ceil() as usize;
-    let height = ((tilereg.area.top - tilereg.area.bottom) / tile_size).ceil() as usize;    
+    let tile_size = get_tile_size(layer, area);
+    let width = ((area.right - area.left) / tile_size).ceil() as usize;
+    let height = ((area.top - area.bottom) / tile_size).ceil() as usize;    
     
     for x in 0..width {
         for y in 0..height {
 
             let room = get_room(
-                tilereg.depth, 
-                tilereg.area.left + (x as f64 * tile_size), 
-                tilereg.area.bottom + (y as f64 * tile_size)
+                layer, 
+                area.left + (x as f64 * tile_size), 
+                area.bottom + (y as f64 * tile_size)
             );
 
             // join this room 
@@ -488,8 +470,8 @@ pub fn update_rooms(client_socket: &SocketRef, tilereg: &TileRegion)  {
     }
 }
 
-fn get_room(depth: usize, left: f64, bottom: f64) -> String {
-    format!("{}{}{}{}{}", depth, SPLIT, to_5_decimals(left), SPLIT, to_5_decimals(bottom))
+fn get_room(layer: usize, left: f64, bottom: f64) -> String {
+    format!("{}{}{}{}{}", layer, SPLIT, to_5_decimals(left), SPLIT, to_5_decimals(bottom))
 }
 
 fn to_5_decimals(x: f64) -> f64 {

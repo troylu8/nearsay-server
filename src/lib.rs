@@ -13,6 +13,16 @@ macro_rules! clone_into_closure {
     };
 }
 
+#[macro_export]
+macro_rules! clone_into_closure_mut {
+    ( ($( $x:ident ),*) $y:expr ) => {
+        {
+            $(let mut $x = $x.clone();)*
+            $y
+        }
+    };
+}
+
 pub enum NearsayError {
     ServerError,
     UserNotFound,
