@@ -1,4 +1,5 @@
 use std::{error::Error, usize};
+use futures::future::try_join;
 use geoutils::Location;
 use redis::aio::MultiplexedConnection;
 use redis::geo::RadiusSearchResult;
@@ -9,11 +10,11 @@ use serde::Deserialize;
 use crate::area::Rect;
 use crate::cluster::{get_cluster_radius_meters, Cluster};
 
-const MIN_CACHED_LAYER: usize = 2;
+const MIN_CACHED_LAYER: usize = 3;
 const MAX_CACHED_LAYER: usize = 5;
 
 /// iterator of (layer name, radius)
-fn all_layers_iter() -> impl Iterator<Item = (String, f64)> {
+fn cached_layers_iter() -> impl Iterator<Item = (String, f64)> {
     (MIN_CACHED_LAYER..=MAX_CACHED_LAYER)
         .map(|num| (
             format!("L{num}"), 
@@ -49,7 +50,7 @@ impl MapLayersCache {
 
     /// `true` if this cluster is a single on any layer
     async fn requires_blurb(&mut self, cluster_id: &str) -> bool {
-        for (layer, _) in all_layers_iter() {
+        for (layer, _) in cached_layers_iter() {
             if let Ok(1) = self.get_cluster_size(&layer, cluster_id).await {
                 return true
             }
@@ -79,7 +80,7 @@ impl MapLayersCache {
         let mut new_cluster = Cluster::new(x, y);
 
         let nearby_clusters = self.geoquery_radius(layer, x, y, radius).await?;
-
+        
         for nearby_cluster in nearby_clusters {
             new_cluster.absorb(&nearby_cluster);
 
@@ -90,10 +91,12 @@ impl MapLayersCache {
             if !merged_cluster_ids_out.contains(&id) {
                 merged_cluster_ids_out.push(id);                         
             }
+            
         }
 
+
         // add cluster id to layer
-        self.redis.geo_add::<_, _, ()>(layer, (Coord::lon_lat(new_cluster.y(), new_cluster.x()), cluster_id)).await?;
+        self.redis.geo_add::<_, _, ()>(layer, (Coord::lon_lat(new_cluster.x(), new_cluster.y()), cluster_id)).await?;
         
         self.set_cluster_size(layer, cluster_id, new_cluster.size).await.unwrap();
 
@@ -105,8 +108,8 @@ impl MapLayersCache {
         let search_results: Vec<RadiusSearchResult> = redis::cmd("GEOSEARCH")
             .arg(layer)
             .arg("FROMLONLAT")
-            .arg(y)
             .arg(x)
+            .arg(y)
             .arg("BYRADIUS")
             .arg(radius)
             .arg(Unit::Meters)
@@ -122,7 +125,7 @@ impl MapLayersCache {
 
     /// clusters of `size > 1` won't have an id unless `include_all_ids == true`, 
     async fn search_res_to_cluster(&mut self, layer: &str, search_res: RadiusSearchResult, include_all_ids: bool) -> Result<Cluster, Box<dyn Error>> {
-        let Coord {latitude: x, longitude: y} = search_res.coord.unwrap();
+        let Coord {longitude: x, latitude: y} = search_res.coord.unwrap();
         
         let size = self.get_cluster_size(layer, &search_res.name).await?;
 
@@ -150,11 +153,11 @@ impl MapLayersCache {
         let search_results: Vec<RadiusSearchResult> = redis::cmd("GEOSEARCH")
             .arg(&layer_name)
             .arg("FROMLONLAT")
-            .arg(mid_y)
             .arg(mid_x)
+            .arg(mid_y)
             .arg("BYBOX")
-            .arg(height)
             .arg(width)
+            .arg(height)
             .arg(Unit::Meters)
             .arg("WITHCOORD")
             .query_async(&mut self.redis).await.map_err(|_| ())?;
@@ -174,7 +177,7 @@ impl MapLayersCache {
         
         let mut merged_cluster_ids = Vec::new();
 
-        for (layer, radius) in all_layers_iter() {
+        for (layer, radius) in cached_layers_iter() {
             self.add_cluster(&layer, radius, post_id, x, y, &mut merged_cluster_ids).await.unwrap();
         }
         

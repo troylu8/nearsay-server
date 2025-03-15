@@ -471,8 +471,13 @@ impl NearsayDB {
         else { cluster(&res[..], get_cluster_radius_degrees(layer))  }
     }
 
-    pub async fn geoquery_users(&mut self, within: &Rect) -> Vec<Cluster> {
-        todo!()
+    pub async fn geoquery_users(&mut self, within: &Rect) -> Vec<Document> {
+        let mut user_docs = self.geoquery::<User>("posts", within).await;
+        let mut res = vec![];
+        while let Some(doc) = user_docs.try_next().await.unwrap() {
+            res.push(doc.into());
+        }
+        res
     }
 
     async fn geoquery<T>(&self, collection: &str, within: &Rect) -> Cursor<Document>
@@ -490,17 +495,21 @@ impl NearsayDB {
     }
 }
 
-use rand::Rng;
-
 pub fn gen_id() -> String {
-
-    let str = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-";
-
-    let mut res: [char; 10] = [' '; 10];
-
-    for i in 0..10 {
-        res[i] = str.chars().nth(rand::thread_rng().gen_range(0..64)).unwrap();
+    let mut res = [' '; 10];
+    
+    for i in 0..res.len() {
+        res[i] = to_base64_symbol(rand::random::<u8>() & 63)
     }
 
     res.iter().collect()
+}
+
+fn to_base64_symbol(num: u8) -> char {
+    if      num < 10    { ('0' as u8 + num) as char }
+    else if num < 36    { (num - 10 + 'a' as u8) as char }
+    else if num < 62    { (num - 36 + 'A' as u8) as char }
+    else if num == 62   { '-' }
+    else if num == 63   { '_' }
+    else                { panic!("cant convert num > 63 to a base64 symbol") }
 }

@@ -20,7 +20,7 @@ struct ViewShiftData {
 #[derive(Serialize, Default, Debug)]
 struct ViewShiftResponse {
     posts: Vec<Cluster>,
-    users: Vec<Cluster>,
+    users: Vec<Document>,
 }
 
 
@@ -292,7 +292,7 @@ pub fn on_socket_connect(client_socket: SocketRef, db: &NearsayDB, key: &Hmac<Sh
                     if let Some(rect) = rect {
                         update_rooms(&client_socket, layer, &rect);
                         resp.posts.extend(db.geoquery_post_pts(layer, &rect).await);
-                        //TODO: users
+                        resp.users.extend(db.geoquery_users(&rect).await);
                     }
                 }
     

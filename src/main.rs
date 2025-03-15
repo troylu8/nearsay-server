@@ -51,8 +51,14 @@ async fn main() {
 
     let mut nearsay_db = NearsayDB::new().await;
 
-    // let (post_id, ..) = nearsay_db.insert_post(None, &[3.0, 3.0], "three three").await.unwrap();
-    // println!("inserted post {}", post_id);
+    let (post_id, ..) = nearsay_db.insert_post(None, &[180.0, 85.0], "three three").await.unwrap();
+    println!("inserted post {}", post_id);
+    let (post_id, ..) = nearsay_db.insert_post(None, &[-180.0, 85.0], "three three").await.unwrap();
+    println!("inserted post {}", post_id);
+    let (post_id, ..) = nearsay_db.insert_post(None, &[180.0, -85.0], "three three").await.unwrap();
+    println!("inserted post {}", post_id);
+    let (post_id, ..) = nearsay_db.insert_post(None, &[-180.0, -85.0], "three three").await.unwrap();
+    println!("inserted post {}", post_id);
     // let (post_id, ..) = nearsay_db.insert_post(None, &[7.0, 7.0], "first").await.unwrap();
     // println!("inserted post {}", post_id);
     // let (post_id, ..) = nearsay_db.insert_post(None, &[7.0, 7.0], "second post long body").await.unwrap();
@@ -66,5 +72,39 @@ async fn main() {
 
 
     println!("{:?}", posts);
+
+}
+
+
+#[cfg(test)]
+mod tests {
+    use std::{thread, time::Duration};
+
+    use rand::Rng;
+
+    use crate::db::NearsayDB;
+
+    fn trunc_2_decimals(x: f64) -> f64 {
+        (x * 100.0).round() / 100.0
+    } 
+
+    #[tokio::test]
+    async fn populate_random() {
+        let mut nearsay_db = NearsayDB::new().await;
+        
+        let mut rng = rand::thread_rng();
+    
+        for _ in 0..500 {
+            let x = trunc_2_decimals(rng.gen_range(-180.0..=180.0));
+            let y = trunc_2_decimals(rng.gen_range(-85.0..=85.0));
+            nearsay_db.insert_post(
+                Some("author_id"), 
+                &[x, y], 
+                "random post"
+            ).await.unwrap();
+        }
+
+        loop { thread::sleep(Duration::from_secs(1000)); }
+    }
 
 }
