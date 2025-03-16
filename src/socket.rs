@@ -9,7 +9,7 @@ use serde_json::json;
 use sha2::Sha256;
 use socketioxide::extract::{AckSender, Data, SocketRef};
 
-use crate::{area::{get_tile_size, Rect, WORLD_BOUND}, auth::{authenticate_jwt, create_jwt, verify_password, JWTPayload}, cluster::Cluster, db::{gen_id, NearsayDB}, types::{Post, User, POI}};
+use crate::{area::{get_tile_size, Rect, WORLD_BOUND_X, WORLD_BOUND_Y}, auth::{authenticate_jwt, create_jwt, verify_password, JWTPayload}, cluster::{Cluster, MAX_ZOOM_LEVEL, MIN_ZOOM_LEVEL}, db::{gen_id, NearsayDB}, types::{Post, User, POI}};
 
 #[derive(Deserialize, Debug)]
 struct ViewShiftData {
@@ -286,11 +286,20 @@ pub fn on_socket_connect(client_socket: SocketRef, db: &NearsayDB, key: &Hmac<Sh
         clone_into_closure_mut! {
             (db)
             |client_socket: SocketRef, Data(ViewShiftData {layer, view}), ack: AckSender| async move {
+                
+                client_socket.leave_all().unwrap();
+                
+                if layer < MIN_ZOOM_LEVEL || MAX_ZOOM_LEVEL < layer { 
+                    return ack.send(&422).unwrap() 
+                }
+                
                 let mut resp = ViewShiftResponse::default();
 
                 for rect in view {
                     if let Some(rect) = rect {
-                        update_rooms(&client_socket, layer, &rect);
+                        if !rect.within_world_bounds() { return ack.send(&422).unwrap() }
+                        
+                        join_rooms(&client_socket, layer, &rect);
                         resp.posts.extend(db.geoquery_post_pts(layer, &rect).await);
                         resp.users.extend(db.geoquery_users(&rect).await);
                     }
@@ -391,8 +400,6 @@ pub fn on_socket_connect(client_socket: SocketRef, db: &NearsayDB, key: &Hmac<Sh
                 let Ok( JWTPayload{ uid } ) = authenticate_jwt(&key, &jwt)
                 else { return };
 
-                println!("{uid}", );
-
                 broadcast_at(&client_socket, pos, "chat", BroadcastTargets::IncludingSelf,
                     &json!({
                         "uid": uid,
@@ -414,10 +421,10 @@ pub fn broadcast_at<T: Sized + Serialize>(io: &SocketRef, pos: [f64; 2], event: 
     let [x, y] = pos;
 
     let mut area = Rect {
-        left: -(WORLD_BOUND as f64), 
-        right: WORLD_BOUND as f64, 
-        top: WORLD_BOUND as f64, 
-        bottom: -(WORLD_BOUND as f64)
+        left: -(WORLD_BOUND_X as f64), 
+        right: WORLD_BOUND_X as f64, 
+        top: WORLD_BOUND_X as f64, 
+        bottom: -(WORLD_BOUND_X as f64)
     };
 
     let broadcast = |room: String,| {
@@ -447,9 +454,7 @@ pub fn broadcast_at<T: Sized + Serialize>(io: &SocketRef, pos: [f64; 2], event: 
 
 const SPLIT: &str = " : ";
 
-pub fn update_rooms(client_socket: &SocketRef, layer: usize, area: &Rect)  {
-
-    client_socket.leave_all().unwrap();
+pub fn join_rooms(client_socket: &SocketRef, layer: usize, area: &Rect)  {
 
     let tile_size = get_tile_size(layer, area);
     let width = ((area.right - area.left) / tile_size).ceil() as usize;

@@ -10,9 +10,9 @@ use nearsay_server::NearsayError;
 use serde::{de::DeserializeOwned, Deserialize};
 use tokio_cron_scheduler::{Job, JobScheduler};
 
-use crate::{area::Rect, cache::MapLayersCache, cluster::{cluster, get_cluster_radius_degrees, Cluster}, types::{get_blurb, Guest, Post, User, UserType, Vote, VoteKind, POI}};
+use crate::{area::Rect, cache::MapLayersCache, cluster::{cluster, get_cluster_radius_degrees, Cluster, MAX_ZOOM_LEVEL}, types::{get_blurb_from_body, Guest, Post, User, UserType, Vote, VoteKind, POI}};
 
-const DEEPEST_ZOOM_LEVEL: usize = 18;
+
 
 /// returns # of days since the epoch
 fn today() -> u64 {
@@ -99,7 +99,7 @@ impl NearsayDB {
         let mut all_posts = self.mongo_db.collection::<Post>("posts").find(doc! {}).await?;
         
         while let Some(post) = all_posts.try_next().await.unwrap() {
-            self.cache.add_post_pt(&post._id, post.pos[0], post.pos[1], &get_blurb(&post.body)).await.unwrap();
+            self.cache.add_post_pt(&post._id, post.pos[0], post.pos[1], &get_blurb_from_body(&post.body)).await.unwrap();
         }
         println!("added all posts back into cache");
         
@@ -319,22 +319,22 @@ impl NearsayDB {
         
         let post_id = gen_id();
         
-        // if let Err(mongo_err) = self.mongo_db.collection("posts").insert_one(doc! {
-        //     "_id": post_id.clone(),
-        //     "pos": pos,
+        if let Err(mongo_err) = self.mongo_db.collection("posts").insert_one(doc! {
+            "_id": post_id.clone(),
+            "pos": pos,
 
-        //     "authorId": author_id,
-        //     "body": body,
-        //     "likes": 0,
-        //     "dislikes": 0,
-        //     "views": 0,
-        //     "expiry": (today() + 7) as i64,
-        // }).await {
-        //     eprintln!("error inserting new post: {}", mongo_err);
-        //     return Err(());
-        // }
+            "authorId": author_id,
+            "body": body,
+            "likes": 0,
+            "dislikes": 0,
+            "views": 0,
+            "expiry": (today() + 7) as i64,
+        }).await {
+            eprintln!("error inserting new post: {}", mongo_err);
+            return Err(());
+        }
 
-        let blurb = get_blurb(body);
+        let blurb = get_blurb_from_body(body);
         
         self.cache.add_post_pt(&post_id, pos[0], pos[1], &blurb).await.unwrap();
         
@@ -452,14 +452,10 @@ impl NearsayDB {
 
     pub async fn geoquery_post_pts(&mut self, layer: usize, within: &Rect) -> Vec<Cluster> {
         
-        // TODO
-        // if let Ok(posts) = self.cache.try_get_post_pts(layer, within).await {
-        //     println!("cache hit", );
-        //     return posts;
-        // }
+        if let Ok(posts) = self.cache.try_get_post_pts(layer, within).await {
+            return posts;
+        }
 
-        println!("cache miss", );
-        
         let mut post_docs = self.geoquery::<Post>("posts", within).await;
         let mut res: Vec<Cluster> = vec![];
         
@@ -468,7 +464,7 @@ impl NearsayDB {
         }
 
         // don't cluster if zoomed all the way in
-        if layer == DEEPEST_ZOOM_LEVEL { res }
+        if layer == MAX_ZOOM_LEVEL { res }
         else { cluster(&res[..], get_cluster_radius_degrees(layer))  }
     }
 

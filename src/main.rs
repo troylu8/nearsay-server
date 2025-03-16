@@ -51,13 +51,16 @@ async fn main() {
 
     let mut nearsay_db = NearsayDB::new().await;
     
-    let res = nearsay_db.insert_post(None, &[7.0, 7.0], "first").await.unwrap();
-    println!("inserted post {:?}", res);
-    let res = nearsay_db.insert_post(None, &[7.0, 7.0], "second post long body").await.unwrap();
-    println!("inserted post {:?}", res);
-    let res = nearsay_db.insert_post(None, &[70.0, 70.0], "faraway").await.unwrap();
-    println!("inserted post {:?}", res);
-
+    // let res = nearsay_db.insert_post(None, &[7.0, 7.0], "first").await.unwrap();
+    // println!("inserted post {:?}", res);
+    // let res = nearsay_db.insert_post(None, &[7.0, 7.0], "second post long body").await.unwrap();
+    // println!("inserted post {:?}", res);
+    // let res = nearsay_db.insert_post(None, &[70.0, 70.0], "faraway").await.unwrap();
+    // println!("inserted post {:?}", res);
+        
+    let res = nearsay_db.geoquery_post_pts(6, &Rect { top: 90.0, bottom: 5.0, left: 5.0, right: 100.0 }).await;
+    println!("{:#?}", res);
+    
 }
 
 
@@ -78,18 +81,16 @@ mod tests {
         let mut nearsay_db = NearsayDB::new().await;
         
         let mut rng = rand::thread_rng();
-    
+        
         for _ in 0..500 {
             let x = trunc_2_decimals(rng.gen_range(-180.0..=180.0));
             let y = trunc_2_decimals(rng.gen_range(-85.0..=85.0));
             nearsay_db.insert_post(
                 Some("author_id"), 
                 &[x, y], 
-                "random post"
+                &format!("blurb{}", rng.gen_range(-180.0..=180.0))
             ).await.unwrap();
         }
-
-        // loop { thread::sleep(Duration::from_secs(1000)); }
     }
 
 }

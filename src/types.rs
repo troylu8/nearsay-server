@@ -29,7 +29,7 @@ impl POI for Post {
     }
 }
 
-pub fn get_blurb(post_body: &str) -> String {
+pub fn get_blurb_from_body(post_body: &str) -> String {
     const BLURB_LENGTH: usize = 10;
     
     if post_body.len() <= BLURB_LENGTH { post_body.to_string() } 

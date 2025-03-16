@@ -2,6 +2,9 @@ use std::collections::{HashSet, HashMap};
 use mongodb::bson::Document;
 use serde::Serialize;
 
+pub const MIN_ZOOM_LEVEL: usize = 3;
+pub const MAX_ZOOM_LEVEL: usize = 18;
+
 pub fn get_cluster_radius_meters(zoom_level: usize) -> f64 {
     const FIFTY_PX_IN_METERS_AT_ZOOM_0: f64 = 7827151.696402048;
 
@@ -16,80 +19,76 @@ pub fn get_cluster_radius_degrees(zoom_level: usize) -> f64 {
 //TODO deleting posts creates "tombstone poi" that just says "post deleted"
 // truly delete at clear_old_posts
 
+// returns `(x, y, size)`
+pub fn merge_clusters(x1: f64, y1: f64, size1: usize, x2: f64, y2: f64, size2: usize) -> (f64, f64, usize) {
+    (
+        (size1 as f64 * x1 + size2 as f64 * x2) / (size1 + size2) as f64,
+        (size1 as f64 * y1 + size2 as f64 * y2) / (size1 + size2) as f64,
+        size1 + size2
+    )
+}
+
+
 #[derive(Debug, Serialize, Clone, PartialEq)]
 pub struct Cluster {
     pub pos: (f64, f64),
-    pub size: usize,
+    pub size: Option<usize>,
 
     pub id: Option<String>,
     pub blurb: Option<String>,
 }
 impl Cluster {
-
-    pub fn x(&self) -> f64 { self.pos.0 }
-    pub fn y(&self) -> f64 { self.pos.1 }
-
+    
     pub fn new(x: f64, y: f64) -> Self {
-        Self {
-            pos: (x, y),
-            size: 1,
-            blurb: None,
-            id: None,
-        }
-    }
-
-    pub fn new_with_blurb(x: f64, y: f64, blurb: String) -> Self {
-        Self {
-            pos: (x, y),
-            size: 1,
-            id: None,
-            blurb: Some(blurb),
-        }
+        Self { pos: (x, y), size: None, id: None, blurb: None }
     }
     
-    pub fn absorb(&mut self, (other_x, other_y): (f64, f64), other_size: usize) {
-        self.pos = 
-        (
-            (self.size as f64 * self.x() + other_size as f64 * other_x) / (self.size + other_size) as f64,
-            (self.size as f64 * self.y() + other_size as f64 * other_y) / (self.size + other_size) as f64
+    pub fn with_blurb(mut self, blurb: String) -> Self {
+        self.blurb = Some(blurb);
+        self
+    }
+    
+    pub fn x(&self) -> f64 { self.pos.0 }
+    pub fn y(&self) -> f64 { self.pos.1 }
+    pub fn size(&self) -> usize { self.size.unwrap_or(1) }
+    
+    pub fn absorb_cluster(&mut self, other: &Cluster) {
+        let (merged_x, merged_y, merged_size) = merge_clusters(
+            self.x(), 
+            self.y(), 
+            self.size(), 
+            
+            other.x(), 
+            other.y(), 
+            other.size()
         );
         
-        self.size += other_size;
-
+        self.pos = (merged_x, merged_y);
+        self.size = Some(merged_size);
+        self.id = None;
         self.blurb = None;
     }
     
-    pub fn absorb_cluster(&mut self, other: &Cluster) {
-        self.absorb(other.pos, other.size);
-    }
-
     pub fn dist_to(&self, other: &Cluster) -> f64 {
         ((self.x() - other.x()).powf(2.0) + (self.y() - other.y()).powf(2.0)).sqrt()
     }
-    pub fn dist_to_pt(&self, (x, y): (f64, f64)) -> f64 {
-        ((self.x() - x).powf(2.0) + (self.y() - y).powf(2.0)).sqrt()
-    }
+    
 }
 
 impl From<Document> for Cluster {
-    fn from(doc: Document) -> Self {
+    fn from(poi_doc: Document) -> Self {
         
-        let [ref x, ref y] = doc.get_array("pos").unwrap()[..2] 
+        let [ref x, ref y] = poi_doc.get_array("pos").unwrap()[..2] 
         else { panic!("'pos' array doesn't have enough elements") };
         
         Self {
             pos: (x.as_f64().unwrap(), y.as_f64().unwrap()),
-            size: doc.get_i32("size").unwrap() as usize,
-            id: None,
-            blurb: 
-                match doc.get_str("blurb") {
-                    Err(_) => None,
-                    Ok(blurb) => Some(blurb.to_string()),
-                },
+            size: None,
+            id: Some(poi_doc.get_str("_id").unwrap().to_string()),
+            blurb: Some(poi_doc.get_str("blurb").unwrap().to_string())
         }
     }
 }
-
 
 pub fn cluster(pts: &[Cluster], radius: f64) -> Vec<Cluster> {
     if radius <= 0.0 { return pts.to_vec() }
@@ -193,8 +192,8 @@ mod tests {
         
         let res = cluster(pts, 1.0);
         assert_eq!(2, res.len());
-        assert_eq!(true, res.contains(&Cluster { pos: (0.5, 0.0), size: 2, id: None, blurb: None }));
-        assert_eq!(true, res.contains(&Cluster { pos: (2.5, 0.0), size: 2,  id: None, blurb: None }));
+        assert_eq!(true, res.contains(&Cluster { pos: (0.5, 0.0), size: Some(2), id: None, blurb: None }));
+        assert_eq!(true, res.contains(&Cluster { pos: (2.5, 0.0), size: Some(2),  id: None, blurb: None }));
     }
     
     #[test]
@@ -206,7 +205,7 @@ mod tests {
             
         let res = cluster(pts, 1.0);
         assert_eq!(1, res.len());
-        assert_eq!(true, res.contains(&Cluster { pos: (1.0, 1.0), size: 2, id: None, blurb: None }));
+        assert_eq!(true, res.contains(&Cluster { pos: (1.0, 1.0), size: Some(2), id: None, blurb: None }));
     }
 
     #[test]
@@ -219,21 +218,21 @@ mod tests {
             
         let res = cluster(pts, 1.0);
         assert_eq!(1, res.len());
-        assert_eq!(true, res.contains(&Cluster { pos: (0.9, 0.9), size: 3, id: None, blurb: None }));
+        assert_eq!(true, res.contains(&Cluster { pos: (0.9, 0.9), size: Some(3), id: None, blurb: None }));
     }
 
     #[test]
     fn blurb_stays_only_when_not_clustered() {
         let pts = &[
-            Cluster::new_with_blurb(9.0, 9.0, "blurb a".to_string()),
-            Cluster::new_with_blurb(0.0, 0.0, "blurb b".to_string()),
-            Cluster::new_with_blurb(1.0, 1.0, "blurb c".to_string()),
+            Cluster::new(9.0, 9.0).with_blurb("blurb a".to_string()),
+            Cluster::new(0.0, 0.0).with_blurb("blurb a".to_string()),
+            Cluster::new(1.0, 1.0).with_blurb("blurb a".to_string()),
         ];
             
         let res = cluster(pts, 2.0);
         assert_eq!(2, res.len());
-        assert_eq!(true, res.contains(&Cluster { pos: (0.5, 0.5), size: 2, id: None, blurb: None }));
-        assert_eq!(true, res.contains(&Cluster { pos: (9.0, 9.0), size: 1, id: None, blurb: Some("blurb a".to_string()) }));
+        assert_eq!(true, res.contains(&Cluster { pos: (0.5, 0.5), size: Some(2), id: None, blurb: None }));
+        assert_eq!(true, res.contains(&Cluster { pos: (9.0, 9.0), size: Some(1), id: None, blurb: Some("blurb a".to_string()) }));
 
     }
 }

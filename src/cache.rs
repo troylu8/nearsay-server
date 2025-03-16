@@ -1,10 +1,13 @@
 use std::collections::HashSet;
 use std::{error::Error, usize};
+use geoutils::Location;
 use redis::aio::MultiplexedConnection;
-use redis::{AsyncCommands, Pipeline, RedisResult};
+use redis::{from_redis_value, AsyncCommands, Pipeline, RedisResult, Value};
 use redis::geo::{Coord, Unit};
 
-use crate::cluster::{get_cluster_radius_meters, Cluster};
+use crate::area::Rect;
+use crate::cluster::{get_cluster_radius_meters, merge_clusters, Cluster};
+use crate::types::get_blurb_from_body;
 
 const MIN_CACHED_LAYER: usize = 3;
 const MAX_CACHED_LAYER: usize = 5;
@@ -46,6 +49,9 @@ fn del_cluster<'a>(mut pipeline: &'a mut Pipeline, layer: usize, cluster_id: &st
     del_cluster_size(pipeline, layer, cluster_id)
 }
 
+fn get_blurb<'a>(pipeline: &'a mut Pipeline, cluster_id: &str) -> &'a mut Pipeline {
+    pipeline.get(format!("blurb:{cluster_id}"))
+}
 fn set_blurb<'a>(pipeline: &'a mut Pipeline, cluster_id: &str, blurb: &str) -> &'a mut Pipeline {
     pipeline.set(format!("blurb:{cluster_id}"), format!(" '{blurb}' ")).ignore()
 }
@@ -56,14 +62,14 @@ fn del_blurb<'a>(pipeline: &'a mut Pipeline, post_id: &str) -> &'a mut Pipeline 
 
 #[derive(Debug, Clone)]
 pub struct MapLayersCache {
-    redis: MultiplexedConnection,
+    redis_connection: MultiplexedConnection,
 }
 impl MapLayersCache {
 
     pub async fn new() -> Result<Self, Box<dyn Error>> {
         Ok(
             Self {
-                redis:  redis::Client::open("redis://localhost")?
+                redis_connection:  redis::Client::open("redis://localhost")?
                         .get_multiplexed_async_connection().await?
             }
         )
@@ -76,9 +82,9 @@ impl MapLayersCache {
         for layer in MIN_CACHED_LAYER..=MAX_CACHED_LAYER {
             pipe_geoquery = geoquery_radius(pipe_geoquery, layer, x, y, get_cluster_radius_meters(layer));
         }
-        // nearby_clusters[x] = (id, pos) of each nearby cluter on layer x
-        let nearby_clusters: [ Vec<(String, (f64, f64))> ; LAYERS_COUNT] = pipe_geoquery.query_async(&mut self.redis).await?;
-        let mut deleted_clusters_ids = HashSet::new();
+        // nearby_clusters[x] = (id, pos) of each nearby cluster on layer x
+        let nearby_clusters: [ Vec<(String, (f64, f64))> ; LAYERS_COUNT] = pipe_geoquery.query_async(&mut self.redis_connection).await?;
+        let mut nearby_clusters_ids = HashSet::new();
         
         let mut pipe_nearby = &mut redis::pipe();
         
@@ -92,53 +98,55 @@ impl MapLayersCache {
             for (nearby_id, _) in nearby_clusters_in_layer {
                 pipe_nearby = get_cluster_size(pipe_nearby, layer, &nearby_id);
                 pipe_nearby = del_cluster(pipe_nearby, layer, &nearby_id);
-                deleted_clusters_ids.insert(nearby_id);
+                nearby_clusters_ids.insert(nearby_id);
                 layers_new_cluster_was_merged_on[i] = true;
             }
         }
 
-        let deleted_clusters_sizes: Vec<usize> = pipe_nearby.query_async(&mut self.redis).await?;
+        let nearby_cluster_sizes: Vec<usize> = pipe_nearby.query_async(&mut self.redis_connection).await?;
         let mut sizes_i = 0;
         
-        let mut pipe_save = &mut redis::pipe();
+        let mut pipe_save = &mut redis::pipe(); // saves new cluster + its size, gets cluster sizes of nearby clusters after merging
         
         // for each layer...
         for (layer, nearby_clusters_in_layer) in nearby_clusters.iter().enumerate() {
             let layer = layer + MIN_CACHED_LAYER;
             
             // create a new cluster
-            let mut new_cluster = Cluster::new(x, y);
+            let mut new_x = x;
+            let mut new_y = y;
+            let mut new_size = 1;
             
             // merge all nearby clusters into the new cluster
-            for (_, nearby_pos) in nearby_clusters_in_layer {
-                new_cluster.absorb(*nearby_pos, deleted_clusters_sizes[sizes_i]);
+            for (_, (nearby_x, nearby_y)) in nearby_clusters_in_layer {
+                (new_x, new_y, new_size) = merge_clusters(new_x, new_y, new_size, *nearby_x, *nearby_y, nearby_cluster_sizes[sizes_i]);
                 sizes_i += 1;
             }
             
             // save new cluster and its size to redis
-            pipe_save = add_cluster(pipe_save, layer, cluster_id, new_cluster.x(), new_cluster.y());
-            pipe_save = set_cluster_size(pipe_save, layer, cluster_id, new_cluster.size);
+            pipe_save = add_cluster(pipe_save, layer, cluster_id, new_x, new_y);
+            pipe_save = set_cluster_size(pipe_save, layer, cluster_id, new_size);
         }
         
-        // get the size of each deleted cluster on each layer...
-        for deleted_cluster_id in &deleted_clusters_ids {
+        // get the size of each deleted cluster on each layer
+        for id in &nearby_clusters_ids {
             for layer in MIN_CACHED_LAYER..=MAX_CACHED_LAYER {
-                pipe_save = get_cluster_size(pipe_save, layer, deleted_cluster_id);
+                pipe_save = get_cluster_size(pipe_save, layer, id);
             }
         }
         
         sizes_i = 0;
         
-        let deleted_clusters_sizes: Vec<Option<usize>> = pipe_save.query_async(&mut self.redis).await?;
+        let nearby_cluster_sizes: Vec<Option<usize>> = pipe_save.query_async(&mut self.redis_connection).await?;
         
         let mut pipe_blurbs = &mut redis::pipe();
         
-        for deleted_cluster_id in &deleted_clusters_ids {
+        for deleted_cluster_id in &nearby_clusters_ids {
             
             // a blurb is required if the cluster is a single on any layer
             let mut blurb_required = false; 
             for _ in 0..LAYERS_COUNT {
-                if let Some(1) = deleted_clusters_sizes[sizes_i] {
+                if let Some(1) = nearby_cluster_sizes[sizes_i] {
                     blurb_required = true;
                 }
                 sizes_i += 1;
@@ -149,57 +157,82 @@ impl MapLayersCache {
         }
         
         // save blurb if new cluster didn't do a merge on any layer
-        for was_merged_on_layer in layers_new_cluster_was_merged_on {
-            if !was_merged_on_layer {
+        for merged_on_layer in layers_new_cluster_was_merged_on {
+            if !merged_on_layer {
                 pipe_blurbs = set_blurb(pipe_blurbs, cluster_id, blurb);
                 break;
             }
         }
         
-        pipe_blurbs.exec_async(&mut self.redis).await?;
+        pipe_blurbs.exec_async(&mut self.redis_connection).await?;
 
         Ok(())
     }
 
     /// returns `(cluster_id, cluster)`
-    // pub async fn try_get_post_pts(&mut self, within: &Rect) -> Result<Vec<Cluster>, ()> {
-    //     if layer < MIN_CACHED_LAYER || MAX_CACHED_LAYER < layer { return Err(()) }
+    pub async fn try_get_post_pts(&mut self, layer: usize, within: &Rect) -> Result<Vec<Cluster>, ()> {
+        if layer < MIN_CACHED_LAYER || MAX_CACHED_LAYER < layer { return Err(()) }
 
-    //     let mid_x = (within.left + within.right) / 2.0;
-    //     let mid_y = (within.top + within.bottom) / 2.0;
+        let mid_x = (within.left + within.right) / 2.0;
+        let mid_y = (within.top + within.bottom) / 2.0;
 
-    //     // width = bottom left -> bottom right, in meters
-    //     let width = Location::new(within.left, within.bottom).haversine_distance_to(&Location::new(within.right, within.bottom)).meters();
+        // width = bottom left -> bottom right, in meters
+        let width_meters = Location::new(within.left, within.bottom).haversine_distance_to(&Location::new(within.right, within.bottom)).meters();
 
-    //     // height = middle top -> middle bottom, in meters
-    //     let height = Location::new(mid_x, within.top).haversine_distance_to(&Location::new(mid_x, within.bottom)).meters();
+        // height = middle top -> middle bottom, in meters
+        let height_meters = Location::new(mid_x, within.top).haversine_distance_to(&Location::new(mid_x, within.bottom)).meters();
 
-    //     let layer_name = format!("L{layer}");
+        let search_results: Vec<(String, (f64, f64))> = redis::cmd("GEOSEARCH")
+            .arg(&format!("L{layer}"))
+            .arg("FROMLONLAT")
+            .arg(mid_x)
+            .arg(mid_y)
+            .arg("BYBOX")
+            .arg(width_meters)
+            .arg(height_meters)
+            .arg(Unit::Meters)
+            .arg("WITHCOORD")
+            .query_async(&mut self.redis_connection).await.map_err(|_| ())?;
 
-    //     let search_results: Vec<(String, (f64, f64))> = redis::cmd("GEOSEARCH")
-    //         .arg(&layer_name)
-    //         .arg("FROMLONLAT")
-    //         .arg(mid_x)
-    //         .arg(mid_y)
-    //         .arg("BYBOX")
-    //         .arg(width)
-    //         .arg(height)
-    //         .arg(Unit::Meters)
-    //         .arg("WITHCOORD")
-    //         .query_async(&mut self.redis).await.map_err(|_| ())?;
-
-    //     //TODO: test
-    //     let p = &mut redis::pipe();
+        let mut p = &mut redis::pipe();
         
-    //     for (cluster_id, _) in search_results {
-    //         p = get_cluster_size(p, layer, cluster_id)
-    //     }
+        // for each cluster found, get its size and blurb
+        for (cluster_id, _) in &search_results {
+            p = get_cluster_size(p, layer, cluster_id);
+            p = get_blurb(p, cluster_id);
+        }
         
-    //     Ok(vec![])
-    // }
+        // [size, blurb, size, blurb, size, blurb, ...]
+        let sizes_and_blurbs: Vec<redis::Value> = p.query_async(&mut self.redis_connection).await.unwrap();
+        
+        let mut res = Vec::with_capacity(search_results.len());
+        
+        // combine `search_results` and `sizes and blurbs` into a Cluster array
+        for (i, (cluster_id, pos)) in search_results.iter().enumerate() {
+            
+            // only attach size if its not 1
+            let size: Option<usize> = match from_redis_value(&sizes_and_blurbs[i * 2]).unwrap() {
+                Some(1) => None,
+                other => other
+            };
+            
+            // only attach id and blurb if not attaching size
+            let (id, blurb): (Option<String>, Option<String>) = match size {
+                None => (
+                    Some(cluster_id.clone()),
+                    from_redis_value(&sizes_and_blurbs[i * 2 + 1]).unwrap()
+                ),
+                _ => (None, None)
+            };
+            
+            res.push(Cluster { pos: *pos, size, id, blurb });
+        }
+        
+        Ok(res)
+    }
 
     pub async fn flush_all(&mut self) -> RedisResult<()> {
-        redis::cmd("FLUSHALL").exec_async(&mut self.redis).await
+        redis::cmd("FLUSHALL").exec_async(&mut self.redis_connection).await
     }
 }
 
