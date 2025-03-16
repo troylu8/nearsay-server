@@ -99,7 +99,7 @@ impl NearsayDB {
         let mut all_posts = self.mongo_db.collection::<Post>("posts").find(doc! {}).await?;
         
         while let Some(post) = all_posts.try_next().await.unwrap() {
-            self.cache.save_post_pt(&post._id, post.pos[0], post.pos[1], &get_blurb(&post.body)).await.unwrap();
+            self.cache.add_post_pt(&post._id, post.pos[0], post.pos[1], &get_blurb(&post.body)).await.unwrap();
         }
         println!("added all posts back into cache");
         
@@ -299,8 +299,8 @@ impl NearsayDB {
     pub async fn delete_post(&mut self, post_id: &str) -> Result<(), ()> {
         self.delete("posts", post_id).await?;
 
-        // delete blurb from cache
-        self.cache.del_blurb(post_id).await.map_err(|_| ())?;
+        // delete blurb from cache TODO
+        // self.cache.del_blurb(post_id).await.map_err(|_| ())?;
         
         // delete post votes
         match 
@@ -319,24 +319,24 @@ impl NearsayDB {
         
         let post_id = gen_id();
         
-        if let Err(mongo_err) = self.mongo_db.collection("posts").insert_one(doc! {
-            "_id": post_id.clone(),
-            "pos": pos,
+        // if let Err(mongo_err) = self.mongo_db.collection("posts").insert_one(doc! {
+        //     "_id": post_id.clone(),
+        //     "pos": pos,
 
-            "authorId": author_id,
-            "body": body,
-            "likes": 0,
-            "dislikes": 0,
-            "views": 0,
-            "expiry": (today() + 7) as i64,
-        }).await {
-            eprintln!("error inserting new post: {}", mongo_err);
-            return Err(());
-        }
+        //     "authorId": author_id,
+        //     "body": body,
+        //     "likes": 0,
+        //     "dislikes": 0,
+        //     "views": 0,
+        //     "expiry": (today() + 7) as i64,
+        // }).await {
+        //     eprintln!("error inserting new post: {}", mongo_err);
+        //     return Err(());
+        // }
 
         let blurb = get_blurb(body);
         
-        self.cache.save_post_pt(&post_id, pos[0], pos[1], &blurb).await.unwrap();
+        self.cache.add_post_pt(&post_id, pos[0], pos[1], &blurb).await.unwrap();
         
         Ok((post_id, blurb))
     }
@@ -452,10 +452,11 @@ impl NearsayDB {
 
     pub async fn geoquery_post_pts(&mut self, layer: usize, within: &Rect) -> Vec<Cluster> {
         
-        if let Ok(posts) = self.cache.try_get_post_pts(layer, within).await {
-            println!("cache hit", );
-            return posts;
-        }
+        // TODO
+        // if let Ok(posts) = self.cache.try_get_post_pts(layer, within).await {
+        //     println!("cache hit", );
+        //     return posts;
+        // }
 
         println!("cache miss", );
         

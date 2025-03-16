@@ -50,28 +50,13 @@ mod auth;
 async fn main() {
 
     let mut nearsay_db = NearsayDB::new().await;
-
-    let (post_id, ..) = nearsay_db.insert_post(None, &[180.0, 85.0], "three three").await.unwrap();
-    println!("inserted post {}", post_id);
-    let (post_id, ..) = nearsay_db.insert_post(None, &[-180.0, 85.0], "three three").await.unwrap();
-    println!("inserted post {}", post_id);
-    let (post_id, ..) = nearsay_db.insert_post(None, &[180.0, -85.0], "three three").await.unwrap();
-    println!("inserted post {}", post_id);
-    let (post_id, ..) = nearsay_db.insert_post(None, &[-180.0, -85.0], "three three").await.unwrap();
-    println!("inserted post {}", post_id);
-    // let (post_id, ..) = nearsay_db.insert_post(None, &[7.0, 7.0], "first").await.unwrap();
-    // println!("inserted post {}", post_id);
-    // let (post_id, ..) = nearsay_db.insert_post(None, &[7.0, 7.0], "second post long body").await.unwrap();
-    // println!("inserted post {}", post_id);
-    // let (post_id, ..) = nearsay_db.insert_post(None, &[70.0, 70.0], "faraway post").await.unwrap();
-    // println!("inserted post {}", post_id);
-
-
-    let posts = 
-        nearsay_db.geoquery_post_pts(2, &Rect {top: 10.0, bottom: 0.0, left: 0.0, right: 10.0 }).await;
-
-
-    println!("{:?}", posts);
+    
+    let res = nearsay_db.insert_post(None, &[7.0, 7.0], "first").await.unwrap();
+    println!("inserted post {:?}", res);
+    let res = nearsay_db.insert_post(None, &[7.0, 7.0], "second post long body").await.unwrap();
+    println!("inserted post {:?}", res);
+    let res = nearsay_db.insert_post(None, &[70.0, 70.0], "faraway").await.unwrap();
+    println!("inserted post {:?}", res);
 
 }
 
@@ -104,7 +89,7 @@ mod tests {
             ).await.unwrap();
         }
 
-        loop { thread::sleep(Duration::from_secs(1000)); }
+        // loop { thread::sleep(Duration::from_secs(1000)); }
     }
 
 }

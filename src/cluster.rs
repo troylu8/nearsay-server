@@ -46,17 +46,21 @@ impl Cluster {
             blurb: Some(blurb),
         }
     }
-
-    pub fn absorb(&mut self, other: &Cluster) {
+    
+    pub fn absorb(&mut self, (other_x, other_y): (f64, f64), other_size: usize) {
         self.pos = 
         (
-            (self.size as f64 * self.x() + other.size as f64 * other.x()) / (self.size + other.size) as f64,
-            (self.size as f64 * self.y() + other.size as f64 * other.y()) / (self.size + other.size) as f64
+            (self.size as f64 * self.x() + other_size as f64 * other_x) / (self.size + other_size) as f64,
+            (self.size as f64 * self.y() + other_size as f64 * other_y) / (self.size + other_size) as f64
         );
         
-        self.size += other.size;
+        self.size += other_size;
 
         self.blurb = None;
+    }
+    
+    pub fn absorb_cluster(&mut self, other: &Cluster) {
+        self.absorb(other.pos, other.size);
     }
 
     pub fn dist_to(&self, other: &Cluster) -> f64 {
@@ -102,7 +106,7 @@ pub fn cluster(pts: &[Cluster], radius: f64) -> Vec<Cluster> {
 
         match grid.get_mut(&bucket) {
             None => { grid.insert(bucket, new_pt.clone()); },
-            Some(inhabitant) => { inhabitant.absorb(new_pt); }
+            Some(inhabitant) => { inhabitant.absorb_cluster(new_pt); }
         }
     }
 
@@ -142,7 +146,7 @@ fn cluster_grid_dfs(
         
         // add current item to final cluster
         Some(final_cluster) => {
-            final_cluster.absorb(grid.get_mut(&bucket_pos).unwrap());
+            final_cluster.absorb_cluster(grid.get_mut(&bucket_pos).unwrap());
         },
     }
 
