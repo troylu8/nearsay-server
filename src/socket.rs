@@ -9,7 +9,7 @@ use serde_json::json;
 use sha2::Sha256;
 use socketioxide::extract::{AckSender, Data, SocketRef};
 
-use crate::{area::{get_tile_size, Rect, WORLD_BOUND_X, WORLD_BOUND_Y}, auth::{authenticate_jwt, create_jwt, verify_password, JWTPayload}, cluster::{Cluster, MAX_ZOOM_LEVEL, MIN_ZOOM_LEVEL}, db::{gen_id, NearsayDB}, types::{Post, User, POI}};
+use crate::{area::{get_tile_size, Rect, WORLD_BOUND_X}, auth::{authenticate_jwt, create_jwt, verify_password, JWTPayload}, cache::UserPOI, cluster::{Cluster, MAX_ZOOM_LEVEL, MIN_ZOOM_LEVEL}, db::{gen_id, NearsayDB}, types::{Post, User, POI}};
 
 #[derive(Deserialize, Debug)]
 struct ViewShiftData {
@@ -20,7 +20,7 @@ struct ViewShiftData {
 #[derive(Serialize, Default, Debug)]
 struct ViewShiftResponse {
     posts: Vec<Cluster>,
-    users: Vec<Document>,
+    users: Vec<UserPOI>,
 }
 
 
@@ -74,7 +74,9 @@ struct SignOutData {
 #[derive(Deserialize, Debug)]
 struct EditUserData {
     jwt: String,
-    update: Document
+    avatar: Option<i32>,      // mongodb doesn't take usize
+    username: Option<String>, 
+    // bio??
 }
 
 #[derive(Deserialize, Debug)]
@@ -116,6 +118,7 @@ pub fn on_socket_connect(client_socket: SocketRef, db: &NearsayDB, key: &Hmac<Sh
         clone_into_closure! {
             (db, key)
             |client_socket: SocketRef, Data(SignInData{username, userhash, pos}), ack: AckSender| async move {
+                let mut db = db;
                 
                 // check if user exists
                 let user = match db.get_user_from_username(&username).await {
@@ -210,6 +213,8 @@ pub fn on_socket_connect(client_socket: SocketRef, db: &NearsayDB, key: &Hmac<Sh
             |client_socket: SocketRef, Data(StartSessionData{ jwt, pos }), ack: AckSender| async move {
                 let Ok(JWTPayload{uid}) = authenticate_jwt(&key, &jwt)
                 else { return ack.send(&401).unwrap() };
+                
+                let mut db = db;
 
                 match db.set_user_pos(&uid, &pos).await {
                     Err(()) => ack.send(&500).unwrap(),
@@ -227,6 +232,8 @@ pub fn on_socket_connect(client_socket: SocketRef, db: &NearsayDB, key: &Hmac<Sh
             }
         }
     );
+    
+    
 
     client_socket.on(
         "sign-out",
@@ -280,13 +287,19 @@ pub fn on_socket_connect(client_socket: SocketRef, db: &NearsayDB, key: &Hmac<Sh
             }
         }
     );
+    
+    client_socket.on(
+        "test",
+        || {
+            println!("test", );
+        }
+    );
 
     client_socket.on(
         "view-shift",
         clone_into_closure_mut! {
             (db)
             |client_socket: SocketRef, Data(ViewShiftData {layer, view}), ack: AckSender| async move {
-                
                 client_socket.leave_all().unwrap();
                 
                 if layer < MIN_ZOOM_LEVEL || MAX_ZOOM_LEVEL < layer { 
@@ -300,8 +313,14 @@ pub fn on_socket_connect(client_socket: SocketRef, db: &NearsayDB, key: &Hmac<Sh
                         if !rect.within_world_bounds() { return ack.send(&422).unwrap() }
                         
                         join_rooms(&client_socket, layer, &rect);
-                        resp.posts.extend(db.geoquery_post_pts(layer, &rect).await);
-                        resp.users.extend(db.geoquery_users(&rect).await);
+                        
+                        if let Ok(post_pts) = db.geoquery_post_pts(layer, &rect).await {
+                            resp.posts.extend(post_pts);
+                        }
+                        
+                        if let Ok(user_pts) = db.geoquery_users(&rect).await {
+                            resp.users.extend(user_pts);
+                        }
                     }
                 }
     
@@ -316,6 +335,8 @@ pub fn on_socket_connect(client_socket: SocketRef, db: &NearsayDB, key: &Hmac<Sh
             (db, key)
             |client_socket: SocketRef, Data(MoveData {jwt, pos})| async move {
                 let Ok(JWTPayload {uid, ..}) = authenticate_jwt(&key, &jwt) else { return };
+                
+                let mut db = db;
 
                 if db.set_user_pos(&uid, &pos).await.is_ok() {
                     broadcast_at(&client_socket, pos, "user-updated", BroadcastTargets::ExcludingSelf, 
@@ -333,18 +354,22 @@ pub fn on_socket_connect(client_socket: SocketRef, db: &NearsayDB, key: &Hmac<Sh
         "edit-user",
         clone_into_closure! {
             (db, key)
-            |client_socket: SocketRef, Data( EditUserData{ jwt, mut update }), ack: AckSender| async move {
+            |client_socket: SocketRef, Data( EditUserData{ jwt, avatar, username }), ack: AckSender| async move {
                 let Ok(JWTPayload {uid, ..}) = authenticate_jwt(&key, &jwt) else { return };
-
-                update.remove("_id");
-                update.remove("pos");
-
-                if let Err(nearsay_err) = db.update_user(&uid, &mut update).await {
-                    return ack.send(&nearsay_err.to_status_code()).unwrap();
-                }
-
+                
+                let mut db = db;
+                
                 let Ok(Some(user)) = db.get::<User>("users", &uid).await 
                 else { return ack.send(&404).unwrap() };
+                
+                let mut update = doc! {
+                    "avatar": avatar,
+                    "username": username,
+                };
+                
+                if let Err(nearsay_err) = db.update_user(&uid, &update).await {
+                    return ack.send(&nearsay_err.to_status_code()).unwrap();
+                }
 
                 if let Some(pos) = user.pos {
                     update.insert("uid", uid);

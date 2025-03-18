@@ -3,7 +3,7 @@ use mongodb::bson::Document;
 use serde::Serialize;
 
 pub const MIN_ZOOM_LEVEL: usize = 3;
-pub const MAX_ZOOM_LEVEL: usize = 18;
+pub const MAX_ZOOM_LEVEL: usize = 19;
 
 pub fn get_cluster_radius_meters(zoom_level: usize) -> f64 {
     const FIFTY_PX_IN_METERS_AT_ZOOM_0: f64 = 7827151.696402048;

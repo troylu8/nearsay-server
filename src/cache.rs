@@ -2,12 +2,13 @@ use std::collections::HashSet;
 use std::{error::Error, usize};
 use geoutils::Location;
 use redis::aio::MultiplexedConnection;
-use redis::{from_redis_value, AsyncCommands, Pipeline, RedisResult, Value};
+use redis::{from_redis_value, AsyncCommands, Cmd, Pipeline, RedisResult, Value};
 use redis::geo::{Coord, Unit};
+use serde::Serialize;
 
 use crate::area::Rect;
 use crate::cluster::{get_cluster_radius_meters, merge_clusters, Cluster};
-use crate::types::get_blurb_from_body;
+use crate::types::User;
 
 const MIN_CACHED_LAYER: usize = 3;
 const MAX_CACHED_LAYER: usize = 5;
@@ -59,18 +60,63 @@ fn del_blurb<'a>(pipeline: &'a mut Pipeline, post_id: &str) -> &'a mut Pipeline 
     pipeline.del(format!("blurb:{post_id}")).ignore()
 }
 
+fn get_avatar<'a>(pipeline: &'a mut Pipeline, uid: &str) -> &'a mut Pipeline {
+    pipeline.get(format!("avatar:{uid}"))
+}
+fn set_avatar<'a>(pipeline: &'a mut Pipeline, uid: &str, avatar: usize) -> &'a mut Pipeline {
+    pipeline.set(format!("avatar:{uid}"), avatar).ignore()
+}
+fn del_avatar<'a>(pipeline: &'a mut Pipeline, uid: &str) -> &'a mut Pipeline {
+    pipeline.del(format!("avatar:{uid}")).ignore()
+}
+
+fn get_username<'a>(pipeline: &'a mut Pipeline, uid: &str) -> &'a mut Pipeline {
+    pipeline.get(format!("username:{uid}"))
+}
+fn set_username<'a>(pipeline: &'a mut Pipeline, uid: &str, username: &str) -> &'a mut Pipeline {
+    pipeline.set(format!("username:{uid}"), format!(" '{username}' ")).ignore()
+}
+fn del_username<'a>(pipeline: &'a mut Pipeline, uid: &str) -> &'a mut Pipeline {
+    pipeline.del(format!("username:{uid}")).ignore()
+}
+
+
+fn geosearch_cmd(key: &str, within: &Rect) -> Cmd {
+    let mid_x = (within.left + within.right) / 2.0;
+        let mid_y = (within.top + within.bottom) / 2.0;
+
+    // width = bottom left -> bottom right, in meters
+    let width_meters = Location::new(within.left, within.bottom).haversine_distance_to(&Location::new(within.right, within.bottom)).meters();
+
+    // height = middle top -> middle bottom, in meters
+    let height_meters = Location::new(mid_x, within.top).haversine_distance_to(&Location::new(mid_x, within.bottom)).meters();
+
+    redis::cmd("GEOSEARCH")
+        .arg(key)
+        .arg("FROMLONLAT")
+        .arg(mid_x)
+        .arg(mid_y)
+        .arg("BYBOX")
+        .arg(width_meters)
+        .arg(height_meters)
+        .arg(Unit::Meters)
+        .arg("WITHCOORD")
+        .to_owned()
+}
+
 
 #[derive(Debug, Clone)]
 pub struct MapLayersCache {
-    redis_connection: MultiplexedConnection,
+    posts_cache: MultiplexedConnection,
+    users_cache: MultiplexedConnection,
 }
 impl MapLayersCache {
 
     pub async fn new() -> Result<Self, Box<dyn Error>> {
         Ok(
             Self {
-                redis_connection:  redis::Client::open("redis://localhost")?
-                        .get_multiplexed_async_connection().await?
+                posts_cache:  redis::Client::open("redis://localhost:6000")?.get_multiplexed_async_connection().await?,
+                users_cache:  redis::Client::open("redis://localhost:6001")?.get_multiplexed_async_connection().await?
             }
         )
     }
@@ -83,7 +129,7 @@ impl MapLayersCache {
             pipe_geoquery = geoquery_radius(pipe_geoquery, layer, x, y, get_cluster_radius_meters(layer));
         }
         // nearby_clusters[x] = (id, pos) of each nearby cluster on layer x
-        let nearby_clusters: [ Vec<(String, (f64, f64))> ; LAYERS_COUNT] = pipe_geoquery.query_async(&mut self.redis_connection).await?;
+        let nearby_clusters: [ Vec<(String, (f64, f64))> ; LAYERS_COUNT] = pipe_geoquery.query_async(&mut self.posts_cache).await?;
         let mut nearby_clusters_ids = HashSet::new();
         
         let mut pipe_nearby = &mut redis::pipe();
@@ -103,7 +149,7 @@ impl MapLayersCache {
             }
         }
 
-        let nearby_cluster_sizes: Vec<usize> = pipe_nearby.query_async(&mut self.redis_connection).await?;
+        let nearby_cluster_sizes: Vec<usize> = pipe_nearby.query_async(&mut self.posts_cache).await?;
         let mut sizes_i = 0;
         
         let mut pipe_save = &mut redis::pipe(); // saves new cluster + its size, gets cluster sizes of nearby clusters after merging
@@ -137,7 +183,7 @@ impl MapLayersCache {
         
         sizes_i = 0;
         
-        let nearby_cluster_sizes: Vec<Option<usize>> = pipe_save.query_async(&mut self.redis_connection).await?;
+        let nearby_cluster_sizes: Vec<Option<usize>> = pipe_save.query_async(&mut self.posts_cache).await?;
         
         let mut pipe_blurbs = &mut redis::pipe();
         
@@ -164,35 +210,18 @@ impl MapLayersCache {
             }
         }
         
-        pipe_blurbs.exec_async(&mut self.redis_connection).await?;
+        pipe_blurbs.exec_async(&mut self.posts_cache).await?;
 
         Ok(())
     }
 
     /// returns `(cluster_id, cluster)`
-    pub async fn try_get_post_pts(&mut self, layer: usize, within: &Rect) -> Result<Vec<Cluster>, ()> {
+    pub async fn geoquery_post_pts(&mut self, layer: usize, within: &Rect) -> Result<Vec<Cluster>, ()> {
         if layer < MIN_CACHED_LAYER || MAX_CACHED_LAYER < layer { return Err(()) }
 
-        let mid_x = (within.left + within.right) / 2.0;
-        let mid_y = (within.top + within.bottom) / 2.0;
-
-        // width = bottom left -> bottom right, in meters
-        let width_meters = Location::new(within.left, within.bottom).haversine_distance_to(&Location::new(within.right, within.bottom)).meters();
-
-        // height = middle top -> middle bottom, in meters
-        let height_meters = Location::new(mid_x, within.top).haversine_distance_to(&Location::new(mid_x, within.bottom)).meters();
-
-        let search_results: Vec<(String, (f64, f64))> = redis::cmd("GEOSEARCH")
-            .arg(&format!("L{layer}"))
-            .arg("FROMLONLAT")
-            .arg(mid_x)
-            .arg(mid_y)
-            .arg("BYBOX")
-            .arg(width_meters)
-            .arg(height_meters)
-            .arg(Unit::Meters)
-            .arg("WITHCOORD")
-            .query_async(&mut self.redis_connection).await.map_err(|_| ())?;
+        let search_results: Vec<(String, (f64, f64))> = 
+            geosearch_cmd(&format!("L{layer}"), within)
+            .query_async(&mut self.posts_cache).await.map_err(|_| ())?;
 
         let mut p = &mut redis::pipe();
         
@@ -203,11 +232,11 @@ impl MapLayersCache {
         }
         
         // [size, blurb, size, blurb, size, blurb, ...]
-        let sizes_and_blurbs: Vec<redis::Value> = p.query_async(&mut self.redis_connection).await.unwrap();
+        let sizes_and_blurbs: Vec<redis::Value> = p.query_async(&mut self.posts_cache).await.unwrap();
         
         let mut res = Vec::with_capacity(search_results.len());
         
-        // combine `search_results` and `sizes and blurbs` into a Cluster array
+        // combine `search_results` and `sizes_and_blurbs` into a `Cluster` array
         for (i, (cluster_id, pos)) in search_results.iter().enumerate() {
             
             // only attach size if its not 1
@@ -230,9 +259,82 @@ impl MapLayersCache {
         
         Ok(res)
     }
+    
+    pub async fn flush_all_posts(&mut self) -> RedisResult<()> {
+        redis::cmd("FLUSHALL").exec_async(&mut self.posts_cache).await
+    }
+    
+    
+    pub async fn set_user_pos(&mut self, uid: &str, x: f64, y: f64) -> RedisResult<()> {
+        self.users_cache.geo_add(uid, (Coord::lon_lat(x, y), uid)).await
+    }
+    
+    pub async fn edit_user_if_exists(&mut self, uid: &str, avatar: Option<usize>, username: Option<&str>) -> RedisResult<()> {
+        if avatar.is_none() && username.is_none() { return Ok(()) }
+        
+        todo!()
+    }
+    
+    pub async fn add_user_at_pos(&mut self, uid: &str, x: f64, y: f64, avatar: usize, username: Option<&str>) -> RedisResult<()>  {
+        let mut p = &mut redis::pipe();
+        
+        p.geo_add(uid, (Coord::lon_lat(x, y), uid)); // add user to geomap
+        p = set_avatar(p, uid, avatar);
+        if let Some(username) = username {
+            p = set_username(p, uid, username);
+        }
+        
+        let _: () = p.query_async(&mut self.users_cache).await?;
+        
+        Ok(())
+    }
+    
+    pub async fn del_user(&mut self, uid: &str) -> RedisResult<()> {
+        let mut p = &mut redis::pipe();
+        
+        p.zrem("users", uid).ignore(); // delete user from geomap
+        p = del_avatar(p, uid);
+        p = del_username(p, uid);
+        
+        let _: () = p.query_async(&mut self.users_cache).await?;
+        
+        Ok(())
+    }
+    
+    pub async fn geoquery_users(&mut self, within: &Rect) -> Result<Vec<UserPOI>, Box<dyn Error>> {
+        let search_results: Vec<(String, (f64, f64))> =  geosearch_cmd("users", within).query_async(&mut self.users_cache).await?;
+        
+        let mut p = &mut redis::pipe();
+        
+        // for each user, get their avatar and username
+        for (uid, _) in &search_results {
+            p = get_avatar(p, uid);
+            p = get_username(p, uid);
+        }
+        
+        // [avatar, username, avatar, username, avatar, username, ...]
+        let avatars_and_names: Vec<redis::Value> = p.query_async(&mut self.posts_cache).await?;
 
-    pub async fn flush_all(&mut self) -> RedisResult<()> {
-        redis::cmd("FLUSHALL").exec_async(&mut self.redis_connection).await
+        let mut res = Vec::with_capacity(search_results.len());
+        
+        // combine `search_results` and `avatars_and_names` into a `UserPOI` array
+        for (i, (uid, pos)) in search_results.iter().enumerate() {
+            res.push(UserPOI {
+                id: uid.to_string(),
+                pos: *pos,
+                avatar: from_redis_value(&avatars_and_names[i * 2])?, 
+                username: from_redis_value(&avatars_and_names[i * 2 + 1])?, 
+            });
+        }
+        
+        Ok(res)
     }
 }
 
+#[derive(Debug, Serialize)]
+pub struct UserPOI {
+    pub id: String,
+    pub pos: (f64, f64),
+    pub avatar: usize,
+    pub username: String
+}

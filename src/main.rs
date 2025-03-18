@@ -18,50 +18,43 @@ mod endpoints;
 mod socket;
 mod auth;
 
-// #[tokio::main]
-// async fn main() -> Result<(), Box<dyn std::error::Error>> {
-//     dotenvy::dotenv()?;
-
-//     let nearsay_db = NearsayDB::new().await;
-
-//     let (socketio_layer, io) = SocketIo::new_layer();
-
-//     let key = Hmac::new_from_slice(env::var("JWT_SECRET").unwrap().as_bytes()).unwrap();
-
-//     io.ns("/", clone_into_closure! { 
-//         (nearsay_db, key) 
-//         move |client_socket| on_socket_connect(client_socket, &nearsay_db, &key) 
-//     });
-
-
-//     let app = axum::Router::new()
-//         .merge(get_endpoints_router(&nearsay_db, &key))
-//         .layer(socketio_layer)
-//         .layer(CorsLayer::permissive());
-
-
-//     let listener = tokio::net::TcpListener::bind("127.0.0.1:5000").await?;
-
-//     axum::serve(listener, app).await?;
-
-//     Ok(())
-// }
 #[tokio::main]
-async fn main() {
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    dotenvy::dotenv()?;
 
-    let mut nearsay_db = NearsayDB::new().await;
-    
-    // let res = nearsay_db.insert_post(None, &[7.0, 7.0], "first").await.unwrap();
-    // println!("inserted post {:?}", res);
-    // let res = nearsay_db.insert_post(None, &[7.0, 7.0], "second post long body").await.unwrap();
-    // println!("inserted post {:?}", res);
-    // let res = nearsay_db.insert_post(None, &[70.0, 70.0], "faraway").await.unwrap();
-    // println!("inserted post {:?}", res);
-        
-    let res = nearsay_db.geoquery_post_pts(6, &Rect { top: 90.0, bottom: 5.0, left: 5.0, right: 100.0 }).await;
-    println!("{:#?}", res);
-    
+    let nearsay_db = NearsayDB::new().await;
+
+    let (socketio_layer, io) = SocketIo::new_layer();
+
+    let key = Hmac::new_from_slice(env::var("JWT_SECRET").unwrap().as_bytes()).unwrap();
+
+    io.ns("/", clone_into_closure! { 
+        (nearsay_db, key) 
+        move |client_socket| on_socket_connect(client_socket, &nearsay_db, &key) 
+    });
+
+
+    let app = axum::Router::new()
+        .merge(get_endpoints_router(&nearsay_db, &key))
+        .layer(socketio_layer)
+        .layer(CorsLayer::permissive());
+
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:5000").await?;
+
+    axum::serve(listener, app).await?;
+
+    Ok(())
 }
+// #[tokio::main]
+// async fn main() {
+
+//     let mut nearsay_db = NearsayDB::new().await;
+        
+//     let res = nearsay_db.geoquery_post_pts(6, &Rect { top: 90.0, bottom: 5.0, left: 5.0, right: 100.0 }).await;
+//     println!("{:#?}", res);
+    
+// }
 
 
 #[cfg(test)]

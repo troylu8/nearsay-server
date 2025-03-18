@@ -2,7 +2,7 @@
 use std::time::SystemTime;
 
 use bcrypt::{hash, DEFAULT_COST};
-use futures::TryStreamExt;
+use futures::{TryFutureExt, TryStreamExt};
 use mongodb::{ 
     bson::{bson, doc, Document}, error::{Error as MongoError, ErrorKind, WriteError, WriteFailure}, options::Hint, results::{DeleteResult, UpdateResult}, Client, Cursor, Database
 };
@@ -10,7 +10,7 @@ use nearsay_server::NearsayError;
 use serde::{de::DeserializeOwned, Deserialize};
 use tokio_cron_scheduler::{Job, JobScheduler};
 
-use crate::{area::Rect, cache::MapLayersCache, cluster::{cluster, get_cluster_radius_degrees, Cluster, MAX_ZOOM_LEVEL}, types::{get_blurb_from_body, Guest, Post, User, UserType, Vote, VoteKind, POI}};
+use crate::{area::Rect, cache::{MapLayersCache, UserPOI}, cluster::{cluster, get_cluster_radius_degrees, Cluster, MAX_ZOOM_LEVEL}, types::{get_blurb_from_body, Guest, Post, User, UserType, Vote, VoteKind, POI}};
 
 
 
@@ -93,7 +93,7 @@ impl NearsayDB {
             .await?;
         println!("delete old posts result: {:?}", delete_old_posts_res);
         
-        self.cache.flush_all().await.unwrap();
+        self.cache.flush_all_posts().await.unwrap();
         println!("cleared map layers cache");
         
         let mut all_posts = self.mongo_db.collection::<Post>("posts").find(doc! {}).await?;
@@ -203,11 +203,17 @@ impl NearsayDB {
         }
     }
 
-    pub async fn set_user_pos(&self, uid: &str, new_pos: &[f64]) -> Result<(), ()> {
-        self.update_user(uid, &mut doc! { "pos": &new_pos as &[f64] }).await.map_err(|_| ())
+    pub async fn set_user_pos(&mut self, uid: &str, pos: &[f64]) -> Result<(), ()> {
+        self.cache.set_user_pos(uid, pos[0], pos[1]).await.map_err(|_| ())
     }
 
-    pub async fn update_user(&self, uid: &str, update: &mut Document) -> Result<(), NearsayError> {
+    pub async fn update_user(&mut self, uid: &str, update: &Document) -> Result<(), NearsayError> {
+        
+        self.cache.edit_user_if_exists(
+            uid,
+            update.get("avatar").map(|a| a.as_i32().unwrap() as usize),
+            update.get("username").map(|u| u.as_str().unwrap()),
+        ).await.map_err(|_| NearsayError::ServerError)?;
 
         match
             self.mongo_db.collection::<User>("users")
@@ -450,34 +456,29 @@ impl NearsayDB {
         }   
     }
 
-    pub async fn geoquery_post_pts(&mut self, layer: usize, within: &Rect) -> Vec<Cluster> {
+    pub async fn geoquery_post_pts(&mut self, layer: usize, within: &Rect) -> Result<Vec<Cluster>, MongoError> {
         
-        if let Ok(posts) = self.cache.try_get_post_pts(layer, within).await {
-            return posts;
+        if let Ok(posts) = self.cache.geoquery_post_pts(layer, within).await {
+            return Ok(posts);
         }
 
-        let mut post_docs = self.geoquery::<Post>("posts", within).await;
+        let mut post_docs = self.geoquery::<Post>("posts", within).await?;
         let mut res: Vec<Cluster> = vec![];
         
-        while let Some(doc) = post_docs.try_next().await.unwrap() {
+        while let Some(doc) = post_docs.try_next().await? {
             res.push(doc.into());
         }
 
         // don't cluster if zoomed all the way in
-        if layer == MAX_ZOOM_LEVEL { res }
-        else { cluster(&res[..], get_cluster_radius_degrees(layer))  }
+        if layer == MAX_ZOOM_LEVEL { Ok(res) }
+        else { Ok(cluster(&res[..], get_cluster_radius_degrees(layer)))  }
     }
 
-    pub async fn geoquery_users(&mut self, within: &Rect) -> Vec<Document> {
-        let mut user_docs = self.geoquery::<User>("posts", within).await;
-        let mut res = vec![];
-        while let Some(doc) = user_docs.try_next().await.unwrap() {
-            res.push(doc.into());
-        }
-        res
+    pub async fn geoquery_users(&mut self, within: &Rect) -> Result<Vec<UserPOI>, Box<dyn std::error::Error>> {
+        self.cache.geoquery_users(within).await
     }
 
-    async fn geoquery<T>(&self, collection: &str, within: &Rect) -> Cursor<Document>
+    async fn geoquery<T>(&self, collection: &str, within: &Rect) -> Result<Cursor<Document>, MongoError>
     where T: Send + Sync + POI
     {
         self.mongo_db.collection::<T>(collection)
@@ -488,7 +489,7 @@ impl NearsayDB {
                 T::get_poi_projection()
             ])
             .hint( Hint::Name("pos_2dsphere".to_string()) )
-            .await.unwrap()
+            .await
     }
 }
 
