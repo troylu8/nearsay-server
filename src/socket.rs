@@ -59,13 +59,13 @@ struct SignUpData {
 }
 
 #[derive(Deserialize, Debug)]
-struct StartSessionData {
+struct EnterWorldData {
     jwt: String,
     pos: [f64; 2]
 }
 
 #[derive(Deserialize, Debug)]
-struct SignOutData {
+struct ExitWorldData {
     jwt: String,
     stay_online: Option<bool>,
     delete_account: Option<bool>
@@ -207,10 +207,10 @@ pub fn on_socket_connect(client_socket: SocketRef, db: &NearsayDB, key: &Hmac<Sh
     );
 
     client_socket.on(
-        "start-session",
+        "enter-world",
         clone_into_closure! {
             (db, key)
-            |client_socket: SocketRef, Data(StartSessionData{ jwt, pos }), ack: AckSender| async move {
+            |client_socket: SocketRef, Data(EnterWorldData{ jwt, pos }), ack: AckSender| async move {
                 let Ok(JWTPayload{uid}) = authenticate_jwt(&key, &jwt)
                 else { return ack.send(&401).unwrap() };
                 
@@ -236,10 +236,10 @@ pub fn on_socket_connect(client_socket: SocketRef, db: &NearsayDB, key: &Hmac<Sh
     
 
     client_socket.on(
-        "sign-out",
+        "exit-world",
         clone_into_closure! {
             (db, key)
-            |client_socket: SocketRef, Data(SignOutData{jwt, stay_online, delete_account}), ack: AckSender| async move {
+            |client_socket: SocketRef, Data(ExitWorldData{jwt, stay_online, delete_account}), ack: AckSender| async move {
 
                 // get uid from jwt
                 let Ok(JWTPayload { uid }) = authenticate_jwt(&key, &jwt)
@@ -250,8 +250,8 @@ pub fn on_socket_connect(client_socket: SocketRef, db: &NearsayDB, key: &Hmac<Sh
                     Err(_) => return ack.send(&500).unwrap(),
                     Ok(None) => return ack.send(&404).unwrap(),
                     Ok(Some(user)) => {
-                        let pos = user.get("pos").expect("user should have a 'pos' field").as_array().unwrap();
-                        let avatar = user.get("avatar").expect("user should have a 'avatar' field").as_i32().unwrap();
+                        let pos = user.get("pos").unwrap().as_array().unwrap();
+                        let avatar = user.get("avatar").unwrap().as_i32().unwrap();
                         (
                             [pos[0].as_f64().unwrap(), pos[1].as_f64().unwrap()],
                             avatar as usize
@@ -330,6 +330,10 @@ pub fn on_socket_connect(client_socket: SocketRef, db: &NearsayDB, key: &Hmac<Sh
     );
     
     client_socket.on(
+        ""
+    )
+    
+    client_socket.on(
         "move",
         clone_into_closure! {
             (db, key)
@@ -367,7 +371,7 @@ pub fn on_socket_connect(client_socket: SocketRef, db: &NearsayDB, key: &Hmac<Sh
                     "username": username,
                 };
                 
-                if let Err(nearsay_err) = db.update_user(&uid, &update).await {
+                if let Err(nearsay_err) = db.edit_user(&uid, &update).await {
                     return ack.send(&nearsay_err.to_status_code()).unwrap();
                 }
 

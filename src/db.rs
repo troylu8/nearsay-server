@@ -207,7 +207,7 @@ impl NearsayDB {
         self.cache.set_user_pos(uid, pos[0], pos[1]).await.map_err(|_| ())
     }
 
-    pub async fn update_user(&mut self, uid: &str, update: &Document) -> Result<(), NearsayError> {
+    pub async fn edit_user(&mut self, uid: &str, update: &Document) -> Result<(), NearsayError> {
         
         self.cache.edit_user_if_exists(
             uid,

@@ -264,15 +264,30 @@ impl MapLayersCache {
         redis::cmd("FLUSHALL").exec_async(&mut self.posts_cache).await
     }
     
+    pub async fn user_exists(&mut self, uid: &str) -> RedisResult<bool> {
+        self.users_cache.exists(format!("avatar:{uid}")).await
+    }
     
     pub async fn set_user_pos(&mut self, uid: &str, x: f64, y: f64) -> RedisResult<()> {
         self.users_cache.geo_add(uid, (Coord::lon_lat(x, y), uid)).await
     }
     
     pub async fn edit_user_if_exists(&mut self, uid: &str, avatar: Option<usize>, username: Option<&str>) -> RedisResult<()> {
-        if avatar.is_none() && username.is_none() { return Ok(()) }
+        if avatar.is_none() && username.is_none()   { return Ok(()) }
+        if !self.user_exists(uid).await?            { return Ok(()) }
         
-        todo!()
+        let mut p = &mut redis::pipe();
+        
+        if let Some(avatar) = avatar {
+            p = set_avatar(p, uid, avatar);
+        }
+        if let Some(username) = username {
+            p = set_username(p, uid, username);
+        }
+        
+        let _:() = p.query_async(&mut self.users_cache).await?;
+        
+        Ok(())
     }
     
     pub async fn add_user_at_pos(&mut self, uid: &str, x: f64, y: f64, avatar: usize, username: Option<&str>) -> RedisResult<()>  {
