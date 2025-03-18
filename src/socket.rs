@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use futures::TryStreamExt;
+use futures::{TryFutureExt, TryStreamExt};
 use hmac::Hmac;
 use mongodb::bson::{doc, Document};
 use serde::{Deserialize, Serialize};
@@ -16,7 +16,6 @@ struct ViewShiftData {
     layer: usize,
     view: [Option<Rect>; 2]
 }
-
 #[derive(Serialize, Default, Debug)]
 struct ViewShiftResponse {
     posts: Vec<Cluster>,
@@ -24,11 +23,12 @@ struct ViewShiftResponse {
 }
 
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Deserialize, Debug)]
 struct MoveData {
     jwt: String,
     pos: [f64; 2],
 }
+
 
 #[derive(Serialize, Deserialize, Debug)]
 struct NewPostData {
@@ -46,16 +46,23 @@ struct NewGuestData {
 #[derive(Deserialize, Debug)]
 struct SignInData {
     username: String,
-    userhash: String,
+    password: String,
     pos: [f64; 2]
 }
 
 #[derive(Deserialize, Debug)]
-struct SignUpData {
-    guest_jwt: Option<String>,
+struct SignUpFromGuestData {
+    guest_jwt: String,
     username: String,
-    userhash: String,
-    avatar: usize
+    password: String,
+}
+
+#[derive(Deserialize, Debug)]
+struct SignUpData {
+    username: String,
+    password: String,
+    avatar: usize,
+    enter_world: Option<[f64; 2]>,
 }
 
 #[derive(Deserialize, Debug)]
@@ -87,7 +94,9 @@ struct ChatData {
 }
 
 pub fn on_socket_connect(client_socket: SocketRef, db: &NearsayDB, key: &Hmac<Sha256>) {
-
+    
+    
+    // todo 
     async fn create_guest(db: &NearsayDB, key: &Hmac<Sha256>, client_socket: SocketRef, Data(NewGuestData {pos, avatar}): Data<NewGuestData>, ack: AckSender) {
         let uid = gen_id();
         let Ok(jwt) = create_jwt(&key, uid.clone()) else { return ack.send(&500).unwrap(); };
@@ -105,19 +114,78 @@ pub fn on_socket_connect(client_socket: SocketRef, db: &NearsayDB, key: &Hmac<Sh
         else { ack.send(&500).unwrap(); };
     }
 
-    client_socket.on("sign-in-guest", clone_into_closure! {
-        (db, key)
-        |client_socket: SocketRef, new_guest_data: Data<NewGuestData>, ack: AckSender| async move {
-            create_guest(&db, &key, client_socket, new_guest_data, ack).await;
+    client_socket.on(
+        "sign-up-as-guest", 
+        clone_into_closure! {
+            (db, key)
+            |client_socket: SocketRef, new_guest_data: Data<NewGuestData>, ack: AckSender| async move {
+                create_guest(&db, &key, client_socket, new_guest_data, ack).await;
+            }
         }
-    });
+    );
+    
+    client_socket.on(
+        "sign-up-from-guest",
+        clone_into_closure! {
+            (db, key)
+            |client_socket: SocketRef, Data(SignUpFromGuestData{ guest_jwt, username, password }), ack: AckSender| async move {
+                
+                let Ok(JWTPayload{uid}) = authenticate_jwt(&key, &guest_jwt)
+                else { return ack.send(&401).unwrap() };
+                
+                let mut db = db;
+                
+                let ((x, y), avatar) = match db.get_guest(&uid).await {
+                    Err(_) => return ack.send(&500).unwrap(),
+                    Ok(val) => val,
+                };
+                
+                match db.insert_user(&uid, &username, &password, avatar).await {
+                    Err(nearsay_err) => ack.send(&nearsay_err.to_status_code()).unwrap(),
+                    Ok(_) => {
+                        broadcast_at(&client_socket, [x, y], "upsert-user", BroadcastTargets::ExcludingSelf, 
+                            &json!({
+                                "uid": uid,
+                                "username": username,
+                                "avatar": avatar
+                            })
+                        );
+                        
+                        ack.send(&()).unwrap()
+                    },
+                }
+            }
+        }
+    );
 
+    client_socket.on(
+        "sign-up",
+        clone_into_closure! {
+            (db, key)
+            |client_socket: SocketRef, Data(SignUpData{ username, password, avatar, enter_world }), ack: AckSender| async move {
+                
+                let uid = gen_id();
+                let Ok(jwt) = create_jwt(&key, uid.clone()) else { return ack.send(&500).unwrap() };
+                
+                if let Err(err) = db.insert_user(&uid, &username, &password, avatar).await {
+                    return ack.send(&err.to_status_code()).unwrap();
+                }
+                
+                if let Some(pos) = enter_world {
+                    // todo enter_world(pos);
+                }
+
+                ack.send(&jwt).unwrap()
+            }
+        }
+    );
+    
     // for getting the jwt from username and password
     client_socket.on(
         "sign-in",
         clone_into_closure! {
             (db, key)
-            |client_socket: SocketRef, Data(SignInData{username, userhash, pos}), ack: AckSender| async move {
+            |client_socket: SocketRef, Data(SignInData{username, password, pos}), ack: AckSender| async move {
                 let mut db = db;
                 
                 // check if user exists
@@ -157,54 +225,9 @@ pub fn on_socket_connect(client_socket: SocketRef, db: &NearsayDB, key: &Hmac<Sh
                 ).unwrap()
 
             }
-        
         }
     );
 
-    // for creating an account
-    client_socket.on(
-        "sign-up",
-        clone_into_closure! {
-            (db, key)
-            |client_socket: SocketRef, Data(SignUpData{guest_jwt, username, userhash, avatar}), ack: AckSender| async move {
-                
-                // extract the uid from the guest jwt, or make a new one
-                let (uid, jwt) = match guest_jwt {
-                    Some(guest_jwt) => {
-                        let Ok(JWTPayload{uid}) = authenticate_jwt(&key, &guest_jwt)
-                        else { return ack.send(&401).unwrap() };
-                        (uid, guest_jwt)
-                    }
-                    None => {
-                        let uid = gen_id();
-                        let Ok(jwt) = create_jwt(&key, uid.clone())
-                        else { return ack.send(&500).unwrap() };
-                        (uid, jwt)
-                    }
-                };
-                
-                match db.insert_user(&uid, &username, &userhash, avatar).await {
-                    Err(err) => return ack.send(&err.to_status_code()).unwrap(),
-
-                    // a guest was replaced
-                    Ok(Some(pos)) => {
-                        // tell everyone someone signed in
-                        broadcast_at(&client_socket, pos, "user-joined", BroadcastTargets::ExcludingSelf, 
-                            &json!({
-                                "uid": uid,
-                                "username": username,
-                                "avatar": avatar
-                            })
-                        );
-                    }
-                    
-                    _ => {}
-                }
-
-                ack.send(&jwt).unwrap()
-            }
-        }
-    );
 
     client_socket.on(
         "enter-world",
@@ -233,8 +256,6 @@ pub fn on_socket_connect(client_socket: SocketRef, db: &NearsayDB, key: &Hmac<Sh
         }
     );
     
-    
-
     client_socket.on(
         "exit-world",
         clone_into_closure! {
@@ -287,13 +308,6 @@ pub fn on_socket_connect(client_socket: SocketRef, db: &NearsayDB, key: &Hmac<Sh
             }
         }
     );
-    
-    client_socket.on(
-        "test",
-        || {
-            println!("test", );
-        }
-    );
 
     client_socket.on(
         "view-shift",
@@ -328,10 +342,6 @@ pub fn on_socket_connect(client_socket: SocketRef, db: &NearsayDB, key: &Hmac<Sh
             }
         }
     );
-    
-    client_socket.on(
-        ""
-    )
     
     client_socket.on(
         "move",
@@ -386,8 +396,6 @@ pub fn on_socket_connect(client_socket: SocketRef, db: &NearsayDB, key: &Hmac<Sh
         }
     );
 
-
-
     client_socket.on(
         "post",
         clone_into_closure! {
@@ -438,7 +446,7 @@ pub fn on_socket_connect(client_socket: SocketRef, db: &NearsayDB, key: &Hmac<Sh
 
             }
         }
-    )
+    );
 
 }
 

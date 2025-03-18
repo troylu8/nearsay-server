@@ -120,24 +120,25 @@ impl NearsayDB {
             Ok(user) => Ok(user),
         }
     }
-
-    pub async fn insert_guest(&self, uid: &str, avatar: usize, pos: &[f64]) -> Result<(), ()> {
-        if let Err(mongo_err) = self.mongo_db.collection("users").insert_one(doc! {
-            "_id": uid,
-            "pos": pos,
-            "avatar": avatar as i32,
-        }).await {
-            eprintln!("mongodb error when starting  guest: {}", &mongo_err);
-            return Err(())
-        }
-
-        Ok(())
+    
+    /// returns `(pos, avatar)`
+    pub async fn get_guest(&mut self, uid: &str) -> Result<((f64, f64), usize), ()> {
+        self.cache.get_guest(uid).await
+        .map_err(|e| {
+            eprintln!("when getting guest: {e}");
+            ()
+        })
+    }
+    
+    pub async fn insert_guest(&mut self, uid: &str, avatar: usize, pos: &[f64]) -> Result<(), ()> {
+        self.cache.add_user(uid, pos[0], pos[1], avatar, None).await
+        .map_err(|e| {
+            eprintln!("when inserting guest: {e}");
+            ()
+        })
     }
 
-    /// will replace guests, but not preexisting users
-    /// 
-    /// returns `Ok(position of guest)` if a guest was replaced
-    pub async fn insert_user(&self, uid: &str, username: &str, userhash: &str, avatar: usize) -> Result<Option<[f64; 2]>, NearsayError> {
+    pub async fn insert_user(&self, uid: &str, username: &str, password: &str, avatar: usize) -> Result<(), NearsayError> {
 
         // check if username is taken
         match
@@ -154,7 +155,7 @@ impl NearsayDB {
         }
 
         // hash password (again) to store in db
-        let userhash = match hash(userhash, DEFAULT_COST) {
+        let userhash = match hash(password, DEFAULT_COST) {
             Err(bcrypt_err) => {
                 eprintln!("bcrypt error when hashing userhash: {}", &bcrypt_err);
                 return Err(NearsayError::ServerError);
@@ -164,42 +165,21 @@ impl NearsayDB {
         
         // insert user data into db
         match 
-            self.mongo_db.collection::<User>("users")
-            .update_one(
-                doc! { "_id": uid },
+            self.mongo_db.collection("users")
+            .insert_one(
                 doc! {
-                    "$set": {
-                        // no position field yet
-                        
-                        "username": username,
-                        "avatar": avatar as i32,
-                        "hash": userhash,
-                    }
+                    "_id": uid,
+                    "username": username,
+                    "avatar": avatar as i32,
+                    "hash": userhash,
                 }
-            )
-            .upsert(true)
-            .await
+            ).await
         {
             Err(mongo_err) => {
                 eprintln!("mongodb error when adding new user: {}", &mongo_err);
                 Err(NearsayError::ServerError)
             },
-            Ok(UpdateResult {upserted_id, modified_count, ..}) => {
-                if modified_count == 0 { return Ok(None) };
-
-                match upserted_id {
-                    None => Ok(None),
-                    Some(guest_id) => {
-                        let guest_id = guest_id.as_str().expect("upserted id should be a str");
-
-                        let Ok(Some(guest)) = 
-                            self.get::<Guest>("users", guest_id).await
-                            else { return Err(NearsayError::ServerError) };
-
-                        Ok(Some(guest.pos))
-                    },
-                }
-            }
+            Ok(_) => Ok(())
         }
     }
 

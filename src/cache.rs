@@ -268,6 +268,17 @@ impl MapLayersCache {
         self.users_cache.exists(format!("avatar:{uid}")).await
     }
     
+    pub async fn get_guest(&mut self, uid: &str) -> RedisResult<((f64, f64), usize)> {
+        let mut p = &mut redis::pipe();
+        
+        p = p.geo_pos("users", uid);
+        p = get_avatar(p, uid);
+        
+        let ((pos,), avatar): (((f64, f64),) , usize ) = p.query_async(&mut self.users_cache).await?;
+        
+        Ok((pos, avatar))
+    }
+    
     pub async fn set_user_pos(&mut self, uid: &str, x: f64, y: f64) -> RedisResult<()> {
         self.users_cache.geo_add(uid, (Coord::lon_lat(x, y), uid)).await
     }
@@ -290,7 +301,7 @@ impl MapLayersCache {
         Ok(())
     }
     
-    pub async fn add_user_at_pos(&mut self, uid: &str, x: f64, y: f64, avatar: usize, username: Option<&str>) -> RedisResult<()>  {
+    pub async fn add_user(&mut self, uid: &str, x: f64, y: f64, avatar: usize, username: Option<&str>) -> RedisResult<()>  {
         let mut p = &mut redis::pipe();
         
         p.geo_add(uid, (Coord::lon_lat(x, y), uid)); // add user to geomap
@@ -351,5 +362,5 @@ pub struct UserPOI {
     pub id: String,
     pub pos: (f64, f64),
     pub avatar: usize,
-    pub username: String
+    pub username: Option<String>
 }
