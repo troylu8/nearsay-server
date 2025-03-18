@@ -8,7 +8,6 @@ use serde::Serialize;
 
 use crate::area::Rect;
 use crate::cluster::{get_cluster_radius_meters, merge_clusters, Cluster};
-use crate::types::User;
 
 const MIN_CACHED_LAYER: usize = 3;
 const MAX_CACHED_LAYER: usize = 5;
@@ -83,10 +82,15 @@ fn del_username<'a>(pipeline: &'a mut Pipeline, uid: &str) -> &'a mut Pipeline {
 
 fn geosearch_cmd(key: &str, within: &Rect) -> Cmd {
     let mid_x = (within.left + within.right) / 2.0;
-        let mid_y = (within.top + within.bottom) / 2.0;
-
-    // width = bottom left -> bottom right, in meters
-    let width_meters = Location::new(within.left, within.bottom).haversine_distance_to(&Location::new(within.right, within.bottom)).meters();
+    let mid_y = (within.top + within.bottom) / 2.0;
+    
+    let width_meters = 
+        if within.bottom > 0.0 { // northern hemisphere: width = bottom left -> bottom right
+            Location::new(within.left, within.bottom).haversine_distance_to(&Location::new(within.right, within.bottom)).meters()
+        }
+        else { // southern hemisphere or around equator: width = top left -> top right, in meters 
+            Location::new(within.left, within.top).haversine_distance_to(&Location::new(within.right, within.top)).meters() 
+        };
 
     // height = middle top -> middle bottom, in meters
     let height_meters = Location::new(mid_x, within.top).haversine_distance_to(&Location::new(mid_x, within.bottom)).meters();
@@ -260,6 +264,10 @@ impl MapLayersCache {
         Ok(res)
     }
     
+    pub async fn del_post(&mut self, post_id: &str) -> RedisResult<()> {
+        self.posts_cache.del(format!("blurb:{post_id}")).await
+    }
+    
     pub async fn flush_all_posts(&mut self) -> RedisResult<()> {
         redis::cmd("FLUSHALL").exec_async(&mut self.posts_cache).await
     }
@@ -268,7 +276,7 @@ impl MapLayersCache {
         self.users_cache.exists(format!("avatar:{uid}")).await
     }
     
-    pub async fn get_guest(&mut self, uid: &str) -> RedisResult<((f64, f64), usize)> {
+    pub async fn get_pos_and_avatar(&mut self, uid: &str) -> RedisResult<((f64, f64), usize)> {
         let mut p = &mut redis::pipe();
         
         p = p.geo_pos("users", uid);

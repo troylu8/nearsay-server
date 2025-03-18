@@ -122,8 +122,8 @@ impl NearsayDB {
     }
     
     /// returns `(pos, avatar)`
-    pub async fn get_guest(&mut self, uid: &str) -> Result<((f64, f64), usize), ()> {
-        self.cache.get_guest(uid).await
+    pub async fn get_pos_and_avatar(&mut self, uid: &str) -> Result<((f64, f64), usize), ()> {
+        self.cache.get_pos_and_avatar(uid).await
         .map_err(|e| {
             eprintln!("when getting guest: {e}");
             ()
@@ -137,6 +137,13 @@ impl NearsayDB {
             ()
         })
     }
+    
+    pub async fn delete_user_from_cache(&mut self, uid: &str) -> Result<(), ()> {
+        self.cache.del_user(uid).await.map_err(|e| {
+            eprintln!("when deleting user from cache: {e}");
+            ()
+        })
+    }
 
     pub async fn insert_user(&self, uid: &str, username: &str, password: &str, avatar: usize) -> Result<(), NearsayError> {
 
@@ -147,21 +154,18 @@ impl NearsayDB {
             .limit(1)
             .await 
         {
-            Ok(count) => if count != 0 { return Err(NearsayError::UsernameTaken); },
-            Err(mongo_err) => {
-                eprintln!("mongodb error when checking if username taken: {}", &mongo_err);
-                return Err(NearsayError::ServerError);
+            Ok(count) => if count != 0 { return Err(NearsayError::UsernameTaken) },
+            Err(e) => {
+                eprintln!("=when checking if username taken: {e}");
+                return Err(NearsayError::ServerError)
             },
         }
 
         // hash password (again) to store in db
-        let userhash = match hash(password, DEFAULT_COST) {
-            Err(bcrypt_err) => {
-                eprintln!("bcrypt error when hashing userhash: {}", &bcrypt_err);
-                return Err(NearsayError::ServerError);
-            },
-            Ok(res) => res,
-        };
+        let userhash = hash(password, DEFAULT_COST).map_err(|e| {
+            eprintln!("when hashing password again: {e}");
+            NearsayError::ServerError
+        })?;
         
         // insert user data into db
         match 
@@ -175,8 +179,8 @@ impl NearsayDB {
                 }
             ).await
         {
-            Err(mongo_err) => {
-                eprintln!("mongodb error when adding new user: {}", &mongo_err);
+            Err(e) => {
+                eprintln!("mongodb error when adding new user: {e}");
                 Err(NearsayError::ServerError)
             },
             Ok(_) => Ok(())
@@ -240,34 +244,9 @@ impl NearsayDB {
         }
     }
 
-    pub async fn sign_out(&self, uid: &str) -> Result<(), NearsayError> {
-        match self.get_user_type(uid).await {
-            Err(_) => Err(NearsayError::ServerError),
-            Ok(None) => Err(NearsayError::UserNotFound),
-            Ok(Some(UserType::Guest)) => {
-                self.delete("users", uid).await.map_err(|_| NearsayError::ServerError)
-            },
-            Ok(Some(UserType::User)) => {
-                match 
-                    self.mongo_db.collection::<User>("users")
-                    .update_one(
-                        doc! { "_id": uid }, 
-                        doc! { "$unset": { "pos": "" } }
-                    )
-                    .await
-                {
-                    Err(mongo_err) => {
-                        eprintln!("mongodb error when signing out user and removing 'pos' field: {}", &mongo_err);
-                        Err(NearsayError::ServerError)
-                    },
-                    Ok(_) => Ok(()),
-                }
-            },
-        }
+    pub async fn delete_user(&mut self, uid: &str) -> Result<(), ()> {
+        self.delete_user_from_cache(uid).await?;
         
-    }
-
-    pub async fn delete_user(&self, uid: &str) -> Result<(), ()> {
         self.delete("users", uid).await?;
 
         // delete user's votes
@@ -285,8 +264,9 @@ impl NearsayDB {
     pub async fn delete_post(&mut self, post_id: &str) -> Result<(), ()> {
         self.delete("posts", post_id).await?;
 
-        // delete blurb from cache TODO
-        // self.cache.del_blurb(post_id).await.map_err(|_| ())?;
+        self.cache.del_post(post_id).await.map_err(|e| {
+            eprintln!("when deleting post from cache: {e}")
+        })?;
         
         // delete post votes
         match 

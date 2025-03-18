@@ -16,8 +16,6 @@ pub fn get_cluster_radius_degrees(zoom_level: usize) -> f64 {
 
     FIFTY_PX_IN_DEG_AT_ZOOM_0 / 2.0_f64.powf(zoom_level as f64)
 }
-//TODO deleting posts creates "tombstone poi" that just says "post deleted"
-// truly delete at clear_old_posts
 
 // returns `(x, y, size)`
 pub fn merge_clusters(x1: f64, y1: f64, size1: usize, x2: f64, y2: f64, size2: usize) -> (f64, f64, usize) {
