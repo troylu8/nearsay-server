@@ -38,17 +38,10 @@ impl NearsayDB {
     pub async fn get<T>(&self, collection: &str, id: &str) -> Result<Option<T>, ()> 
     where T: Send + Sync + DeserializeOwned
     {
-        match 
-            self.mongo_db.collection::<T>(collection)
+        self.mongo_db.collection::<T>(collection)
             .find_one( doc!{ "_id": id } )
             .await
-        {
-            Err(mongo_err) => {
-                eprintln!("error getting item {}", mongo_err);
-                Err(())
-            },
-            Ok(item) => Ok(item)
-        }
+            .map_err(|e| eprintln!("error getting item {e}"))
     }
 
     async fn delete(&self, collection: &str, id: &str) -> Result<(), ()> {
@@ -121,8 +114,7 @@ impl NearsayDB {
         }
     }
     
-    /// returns `(pos, avatar)`
-    pub async fn get_pos_and_avatar(&mut self, uid: &str) -> Result<((f64, f64), usize), ()> {
+    pub async fn get_pos_and_avatar(&mut self, uid: &str) -> Result<Option<((f64, f64), usize)>, ()> {
         self.cache.get_pos_and_avatar(uid).await
         .map_err(|e| {
             eprintln!("when getting guest: {e}");
@@ -132,10 +124,7 @@ impl NearsayDB {
     
     pub async fn insert_guest(&mut self, uid: &str, avatar: usize, pos: &[f64]) -> Result<(), ()> {
         self.cache.add_user(uid, pos[0], pos[1], avatar, None).await
-        .map_err(|e| {
-            eprintln!("when inserting guest: {e}");
-            ()
-        })
+        .map_err(|e| eprintln!("when inserting guest: {e}"))
     }
     
     pub async fn delete_user_from_cache(&mut self, uid: &str) -> Result<(), ()> {
@@ -186,62 +175,35 @@ impl NearsayDB {
             Ok(_) => Ok(())
         }
     }
-
-    pub async fn set_user_pos(&mut self, uid: &str, pos: &[f64]) -> Result<(), ()> {
-        self.cache.set_user_pos(uid, pos[0], pos[1]).await.map_err(|_| ())
+    
+    /// returns old position of user
+    pub async fn set_user_pos(&mut self, uid: &str, pos: &[f64]) -> Result<Option<(f64, f64)>, ()> {
+        self.cache.set_user_pos(uid, pos[0], pos[1]).await.map_err(|e| eprintln!("when moving user: {e}"))
     }
 
     pub async fn edit_user(&mut self, uid: &str, update: &Document) -> Result<(), NearsayError> {
+        
+        self.mongo_db.collection::<User>("users")
+            .update_one(
+                doc! { "_id": uid },
+                doc! { "$set": update }
+            )
+            .await
+            .map_err(|e| match *e.kind {
+                ErrorKind::Write(WriteFailure::WriteError(WriteError {code, ..})) if code == 11000 => NearsayError::UsernameTaken,
+                other => {
+                    eprintln!("error updating user: {}", other);
+                    NearsayError::ServerError
+                }
+            })?;
         
         self.cache.edit_user_if_exists(
             uid,
             update.get("avatar").map(|a| a.as_i32().unwrap() as usize),
             update.get("username").map(|u| u.as_str().unwrap()),
         ).await.map_err(|_| NearsayError::ServerError)?;
-
-        match
-            self.mongo_db.collection::<User>("users")
-            .update_one(
-                doc! { "_id": uid },
-                doc! { "$set": update }
-            )
-            .await
-        {
-            Err(mongo_err) => {
-
-                match *mongo_err.kind {
-                    ErrorKind::Write(WriteFailure::WriteError(WriteError {code, ..})) 
-                    if code == 11000 => {
-
-                        Err(NearsayError::UsernameTaken)
-                    },
-                    other => {
-                        eprintln!("error updating user: {}", other);
-                        Err(NearsayError::ServerError)
-                    }
-                }
-                    
-            },
-            Ok(_) => Ok(()),
-        }
-    }
-
-    pub async fn get_user_type(&self, uid: &str) -> Result<Option<UserType>, ()> {
-        match 
-            self.mongo_db.collection::<Document>("users")
-            .find_one(doc! { "_id": uid })
-            .await
-        {
-            Err(mongo_err) => {
-                eprintln!("error getting user type: {}", mongo_err);
-                Err(())
-            },
-            Ok(None) => Ok(None),
-            Ok(Some(document)) => match document.contains_key("username") {
-                true => Ok(Some(UserType::User)),
-                false => Ok(Some(UserType::Guest)),
-            },
-        }
+        
+        Ok(())
     }
 
     pub async fn delete_user(&mut self, uid: &str) -> Result<(), ()> {

@@ -4,6 +4,7 @@ use area::Rect;
 use hmac::{Hmac, Mac};
 use db::NearsayDB;
 use endpoints::get_endpoints_router;
+use mongodb::bson::doc;
 use socket::on_socket_connect;
 use socketioxide::SocketIo;
 use tower_http::cors::CorsLayer;
@@ -47,13 +48,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 // #[tokio::main]
-// async fn main() {
+// async fn main() -> Result<(), ()> {
 
 //     let mut nearsay_db = NearsayDB::new().await;
         
-//     let res = nearsay_db.geoquery_post_pts(6, &Rect { top: 90.0, bottom: 5.0, left: 5.0, right: 100.0 }).await;
-//     println!("{:#?}", res);
+//     nearsay_db.insert_guest("abc", 1, &[10.0, 10.0]).await?;
+//     nearsay_db.insert_guest("ccc",2, &[20.0, 10.0]).await?;
+//     println!("{}", nearsay_db.move_user("abc", &[25.0, 10.0]).await?);
+//     nearsay_db.edit_user("abc", &doc! { "username": "new username" }).await.unwrap();
+//     nearsay_db.delete_user("ccc").await?;
+//     let r = nearsay_db.geoquery_users(&Rect { top: 30.0, bottom: 0.0, left: 20.0, right: 25.0 }).await;
+//     println!("{r:?}");
     
+//     Ok(())
 // }
 
 

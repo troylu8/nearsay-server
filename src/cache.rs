@@ -276,19 +276,23 @@ impl MapLayersCache {
         self.users_cache.exists(format!("avatar:{uid}")).await
     }
     
-    pub async fn get_pos_and_avatar(&mut self, uid: &str) -> RedisResult<((f64, f64), usize)> {
+    pub async fn get_pos_and_avatar(&mut self, uid: &str) -> RedisResult<Option<((f64, f64), usize)>> {
         let mut p = &mut redis::pipe();
         
         p = p.geo_pos("users", uid);
         p = get_avatar(p, uid);
         
-        let ((pos,), avatar): (((f64, f64),) , usize ) = p.query_async(&mut self.users_cache).await?;
+        let ((pos,), avatar): ( (redis::Value,) , redis::Value ) = p.query_async(&mut self.users_cache).await?;
         
-        Ok((pos, avatar))
+        if avatar == redis::Value::Nil { Ok(None) }
+        else { Ok( Some( ( from_redis_value(&pos)?, from_redis_value(&avatar)? ) ) ) }
     }
     
-    pub async fn set_user_pos(&mut self, uid: &str, x: f64, y: f64) -> RedisResult<()> {
-        self.users_cache.geo_add(uid, (Coord::lon_lat(x, y), uid)).await
+    /// returns old position of user
+    pub async fn set_user_pos(&mut self, uid: &str, x: f64, y: f64) -> RedisResult<Option<(f64, f64)>> {
+        let old_pos = self.get_pos_and_avatar(uid).await?.map(|(old_pos, _)| old_pos);
+        let _: () = self.users_cache.geo_add("users", (Coord::lon_lat(x, y), uid)).await?;
+        Ok(old_pos)
     }
     
     pub async fn edit_user_if_exists(&mut self, uid: &str, avatar: Option<usize>, username: Option<&str>) -> RedisResult<()> {
@@ -312,7 +316,7 @@ impl MapLayersCache {
     pub async fn add_user(&mut self, uid: &str, x: f64, y: f64, avatar: usize, username: Option<&str>) -> RedisResult<()>  {
         let mut p = &mut redis::pipe();
         
-        p.geo_add(uid, (Coord::lon_lat(x, y), uid)); // add user to geomap
+        p.geo_add("users", (Coord::lon_lat(x, y), uid)); // add user to geomap
         p = set_avatar(p, uid, avatar);
         if let Some(username) = username {
             p = set_username(p, uid, username);
@@ -337,7 +341,7 @@ impl MapLayersCache {
     
     pub async fn geoquery_users(&mut self, within: &Rect) -> Result<Vec<UserPOI>, Box<dyn Error>> {
         let search_results: Vec<(String, (f64, f64))> =  geosearch_cmd("users", within).query_async(&mut self.users_cache).await?;
-        
+        println!("{:?}", search_results);
         let mut p = &mut redis::pipe();
         
         // for each user, get their avatar and username
@@ -347,8 +351,8 @@ impl MapLayersCache {
         }
         
         // [avatar, username, avatar, username, avatar, username, ...]
-        let avatars_and_names: Vec<redis::Value> = p.query_async(&mut self.posts_cache).await?;
-
+        let avatars_and_names: Vec<redis::Value> = p.query_async(&mut self.users_cache).await?;
+        println!("{:?}", avatars_and_names);
         let mut res = Vec::with_capacity(search_results.len());
         
         // combine `search_results` and `avatars_and_names` into a `UserPOI` array

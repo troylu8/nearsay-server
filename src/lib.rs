@@ -23,6 +23,7 @@ macro_rules! clone_into_closure_mut {
     };
 }
 
+#[derive(Debug)]
 pub enum NearsayError {
     ServerError,
     UserNotFound,

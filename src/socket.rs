@@ -135,7 +135,8 @@ pub fn on_socket_connect(client_socket: SocketRef, db: &NearsayDB, key: &Hmac<Sh
                 
                 let ((x, y), avatar) = match db.get_pos_and_avatar(&uid).await {
                     Err(_) => return ack.send(&500).unwrap(),
-                    Ok(val) => val,
+                    Ok(None) => return ack.send(&404).unwrap(),
+                    Ok(Some(vals)) => vals,
                 };
                 
                 match db.insert_user(&uid, &username, &password, avatar).await {
@@ -220,7 +221,7 @@ pub fn on_socket_connect(client_socket: SocketRef, db: &NearsayDB, key: &Hmac<Sh
                 else { return ack.send(&500).unwrap() };
                 
                 if let Some(pos) = pos {
-                    enter_world(&mut db, client_socket, &user._id, pos, user.avatar).await;
+                    enter_world(&mut db, client_socket, &user._id, pos, user.avatar).await.unwrap();
                 }
                 
                 ack.send( &json!({ "jwt": jwt, "avatar": user.avatar })).unwrap()
@@ -228,7 +229,6 @@ pub fn on_socket_connect(client_socket: SocketRef, db: &NearsayDB, key: &Hmac<Sh
             }
         }
     );
-
 
     client_socket.on(
         "enter-world",
@@ -240,8 +240,8 @@ pub fn on_socket_connect(client_socket: SocketRef, db: &NearsayDB, key: &Hmac<Sh
                 
                 match db.set_user_pos(&uid, &pos).await {
                     Err(()) => ack.send(&500).unwrap(),
-                    Ok(()) => {
-                        broadcast_at(&client_socket, pos, "user-exit", BroadcastTargets::ExcludingSelf, 
+                    Ok(_) => {
+                        broadcast_at(&client_socket, pos, "user-enter", BroadcastTargets::ExcludingSelf, 
                             &json!({
                                 "uid": uid,
                                 "pos": &pos as &[f64]
@@ -267,7 +267,8 @@ pub fn on_socket_connect(client_socket: SocketRef, db: &NearsayDB, key: &Hmac<Sh
 
                 let ((x, y), avatar) = match db.get_pos_and_avatar(&uid).await {
                     Err(_) => return ack.send(&500).unwrap(),
-                    Ok(vals) => vals,
+                    Ok(None) => return ack.send(&404).unwrap(),
+                    Ok(Some(vals)) => vals,
                 };
                 
                 let res = match delete_account {
@@ -280,7 +281,7 @@ pub fn on_socket_connect(client_socket: SocketRef, db: &NearsayDB, key: &Hmac<Sh
                 
                 // create a guest poi if stay_online == true
                 match stay_online {
-                    Some(true) =>   create_guest(&mut db, &key, client_socket, [x, y], avatar, ack).await,
+                    Some(true) => create_guest(&mut db, &key, client_socket, [x, y], avatar, ack).await,
                     _ => {
                         broadcast_at(&client_socket, [x, y], "user-leave", BroadcastTargets::ExcludingSelf, &json!( { "uid": uid } ));
                         ack.send(&()).unwrap()
@@ -331,13 +332,14 @@ pub fn on_socket_connect(client_socket: SocketRef, db: &NearsayDB, key: &Hmac<Sh
             |client_socket: SocketRef, Data(MoveData {jwt, pos})| async move {
                 let Ok(JWTPayload {uid, ..}) = authenticate_jwt(&key, &jwt) else { return };
                 
-                if db.set_user_pos(&uid, &pos).await.is_ok() {
-                    broadcast_at(&client_socket, pos, "user-updated", BroadcastTargets::ExcludingSelf, 
-                        &json!({
-                            "uid": uid,
-                            "pos": &pos as &[f64]
-                        })
-                    );
+                if let Ok(Some(old_pos)) = db.set_user_pos(&uid, &pos).await {
+                    let broadcast_data = &json!({
+                        "uid": uid,
+                        "pos": &pos as &[f64]
+                    });
+                    
+                    broadcast_at(&client_socket, old_pos.into(), "user-updated", BroadcastTargets::ExcludingSelf, broadcast_data);
+                    broadcast_at(&client_socket, pos, "user-updated", BroadcastTargets::ExcludingSelf, broadcast_data);
                 }
             }
         }

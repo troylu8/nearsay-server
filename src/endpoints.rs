@@ -39,21 +39,14 @@ pub fn get_endpoints_router(db: &NearsayDB, key: &Hmac<Sha256>) -> axum::Router 
 
                     match authenticate_with_header(&key, &headers) {
                         Err(_) | Ok(None) => StatusCode::UNAUTHORIZED,
-
+                        
                         // user must exist
-                        Ok(Some(JWTPayload {uid, ..} )) => 
-                            match db.get_user_type(&uid).await
-                        {
-                            Err(_) => StatusCode::INTERNAL_SERVER_ERROR,
-                            Ok(None) | Ok(Some(UserType::Guest)) => StatusCode::UNAUTHORIZED,
-                            
-                            Ok(Some(UserType::User)) => 
-                                match db.insert_vote(&uid, &post_id, VoteKind::from_str(&vote_kind)).await 
-                            {
+                        Ok(Some(JWTPayload {uid, ..} )) => {
+                            match db.get::<User>("users", &uid).await {
+                                Err(()) => StatusCode::UNAUTHORIZED,
                                 Ok(_) => StatusCode::OK,
-                                Err(_) => StatusCode::INTERNAL_SERVER_ERROR,
                             }
-                        },
+                        }
                     }
                 }
             }
