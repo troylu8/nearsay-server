@@ -341,7 +341,6 @@ impl MapLayersCache {
     
     pub async fn geoquery_users(&mut self, within: &Rect) -> Result<Vec<UserPOI>, Box<dyn Error>> {
         let search_results: Vec<(String, (f64, f64))> =  geosearch_cmd("users", within).query_async(&mut self.users_cache).await?;
-        println!("{:?}", search_results);
         let mut p = &mut redis::pipe();
         
         // for each user, get their avatar and username
@@ -352,7 +351,6 @@ impl MapLayersCache {
         
         // [avatar, username, avatar, username, avatar, username, ...]
         let avatars_and_names: Vec<redis::Value> = p.query_async(&mut self.users_cache).await?;
-        println!("{:?}", avatars_and_names);
         let mut res = Vec::with_capacity(search_results.len());
         
         // combine `search_results` and `avatars_and_names` into a `UserPOI` array

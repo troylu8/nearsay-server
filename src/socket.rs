@@ -63,6 +63,8 @@ struct SignInData {
     username: String,
     password: String,
     pos: Option<[f64; 2]>,
+    
+    guest_jwt: Option<String>
 }
 
 #[derive(Deserialize, Debug)]
@@ -100,7 +102,7 @@ pub fn on_socket_connect(client_socket: SocketRef, db: &NearsayDB, key: &Hmac<Sh
         
         let Ok(jwt) = create_jwt(&key, uid.clone()) else { return ack.send(&500).unwrap(); };
         
-        if db.insert_guest(&uid, avatar, &pos).await.is_ok() {
+        if db.add_user_to_cache(&uid, &pos, avatar, None).await.is_ok() {
             broadcast_at(&client_socket, pos, "user-update", BroadcastTargets::ExcludingSelf, 
                 &json! ({
                     "uid": uid,
@@ -158,15 +160,16 @@ pub fn on_socket_connect(client_socket: SocketRef, db: &NearsayDB, key: &Hmac<Sh
     );
     
     
-    async fn enter_world(db: &mut NearsayDB, client_socket: SocketRef, uid: &str, pos: [f64; 2], avatar: usize) -> Result<(), ()> {
+    async fn enter_world(db: &mut NearsayDB, client_socket: SocketRef, uid: &str, pos: [f64; 2], avatar: usize, username: Option<&str>) -> Result<(), ()> {
         
-        db.set_user_pos(&uid, &pos).await?;
+        db.add_user_to_cache(uid, &pos, avatar, username).await?;
 
         broadcast_at(&client_socket, pos, "user-enter", BroadcastTargets::ExcludingSelf,
             &json! ({
                 "uid": uid,
                 "pos": pos,
-                "avatar": avatar
+                "avatar": avatar,
+                "username": username
             })
         );
         
@@ -187,7 +190,7 @@ pub fn on_socket_connect(client_socket: SocketRef, db: &NearsayDB, key: &Hmac<Sh
                 }
                 
                 if let Some(pos) = pos {
-                    let _ = enter_world(&mut db, client_socket, &uid, pos, avatar).await;
+                    let _ = enter_world(&mut db, client_socket, &uid, pos, avatar, Some(&username)).await;
                 }
 
                 ack.send(&jwt).unwrap()
@@ -200,7 +203,7 @@ pub fn on_socket_connect(client_socket: SocketRef, db: &NearsayDB, key: &Hmac<Sh
         "sign-in",
         clone_into_closure_mut! {
             (db, key)
-            |client_socket: SocketRef, Data(SignInData{username, password, pos}), ack: AckSender| async move {
+            |client_socket: SocketRef, Data(SignInData{username, password, pos, guest_jwt}), ack: AckSender| async move {
                 
                 // check if user exists
                 let user = match db.get_user_from_username(&username).await {
@@ -215,17 +218,27 @@ pub fn on_socket_connect(client_socket: SocketRef, db: &NearsayDB, key: &Hmac<Sh
                     Ok(false) => return ack.send(&401).unwrap(),
                     Ok(true) => {},
                 }
+                
+                // if guest jwt was given, verify it before removing guest from cache
+                if let Some(guest_jwt) = guest_jwt {
+                    if let Ok(JWTPayload { uid, .. }) = authenticate_jwt(&key, &guest_jwt) {
+                        if let Ok(Some((pos, _))) = db.get_pos_and_avatar(&uid).await {
+                            db.delete_user_from_cache(&uid).await.unwrap();
+                            broadcast_at(&client_socket, pos.into(), "user-leave", BroadcastTargets::ExcludingSelf, &json!( { "uid": uid } ));
+                        }
+                    }
+                }
 
                 // create jwt with this uid
                 let Ok(jwt) = create_jwt(&key, user._id.clone()) 
                 else { return ack.send(&500).unwrap() };
                 
                 if let Some(pos) = pos {
-                    enter_world(&mut db, client_socket, &user._id, pos, user.avatar).await.unwrap();
+                    enter_world(&mut db, client_socket, &user._id, pos, user.avatar, Some(&username)).await.unwrap();
                 }
                 
-                ack.send( &json!({ "jwt": jwt, "avatar": user.avatar })).unwrap()
-
+                ack.send( &json!({ "jwt": jwt, "avatar": user.avatar })).unwrap();
+                
             }
         }
     );

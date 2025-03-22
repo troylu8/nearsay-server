@@ -122,9 +122,11 @@ impl NearsayDB {
         })
     }
     
-    pub async fn insert_guest(&mut self, uid: &str, avatar: usize, pos: &[f64]) -> Result<(), ()> {
-        self.cache.add_user(uid, pos[0], pos[1], avatar, None).await
-        .map_err(|e| eprintln!("when inserting guest: {e}"))
+    
+    
+    pub async fn add_user_to_cache(&mut self, uid: &str, pos: &[f64], avatar: usize, username: Option<&str>) -> Result<(), ()> {
+        self.cache.add_user(uid, pos[0], pos[1], avatar, username).await
+        .map_err(|e| eprintln!("when adding user to cache: {e}"))
     }
     
     pub async fn delete_user_from_cache(&mut self, uid: &str) -> Result<(), ()> {
@@ -134,7 +136,7 @@ impl NearsayDB {
         })
     }
 
-    pub async fn insert_user(&self, uid: &str, username: &str, password: &str, avatar: usize) -> Result<(), NearsayError> {
+    pub async fn insert_user(&mut self, uid: &str, username: &str, password: &str, avatar: usize) -> Result<(), NearsayError> {
 
         // check if username is taken
         match
@@ -157,8 +159,7 @@ impl NearsayDB {
         })?;
         
         // insert user data into db
-        match 
-            self.mongo_db.collection("users")
+        self.mongo_db.collection("users")
             .insert_one(
                 doc! {
                     "_id": uid,
@@ -167,13 +168,15 @@ impl NearsayDB {
                     "hash": userhash,
                 }
             ).await
-        {
-            Err(e) => {
+            .map_err(|e| {
                 eprintln!("mongodb error when adding new user: {e}");
-                Err(NearsayError::ServerError)
-            },
-            Ok(_) => Ok(())
-        }
+                NearsayError::ServerError
+            })?;
+            
+        self.cache.edit_user_if_exists(uid, Some(avatar), Some(username)).await.map_err(|e| {
+            eprintln!("when updating cache while adding new user: {e}");
+            NearsayError::ServerError
+        })
     }
     
     /// returns old position of user
