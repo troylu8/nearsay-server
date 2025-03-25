@@ -10,7 +10,7 @@ use nearsay_server::NearsayError;
 use serde::{de::DeserializeOwned, Deserialize};
 use tokio_cron_scheduler::{Job, JobScheduler};
 
-use crate::{area::Rect, cache::{MapLayersCache, UserPOI}, cluster::{cluster, get_cluster_radius_degrees, Cluster, MAX_ZOOM_LEVEL}, types::{get_blurb_from_body, Guest, Post, User, UserType, Vote, VoteKind, POI}};
+use crate::{area::Rect, cache::{MapCache, UserPOI}, cluster::{cluster, get_cluster_radius_degrees, Cluster, MAX_ZOOM_LEVEL}, types::{get_blurb_from_body, Guest, Post, User, UserType, Vote, VoteKind, POI}};
 
 
 
@@ -22,13 +22,13 @@ fn today() -> u64 {
 
 #[derive(Clone)]
 pub struct NearsayDB {
-    cache: MapLayersCache,
+    cache: MapCache,
     mongo_db: Database,
 }
 impl NearsayDB {
     pub async fn new() -> Self {
         let mongo_db = Client::with_uri_str("mongodb://localhost:27017").await.unwrap().database("nearsay");
-        let nearsay_db = Self { cache: MapLayersCache::new().await.unwrap(), mongo_db };
+        let nearsay_db = Self { cache: MapCache::new().await.unwrap(), mongo_db };
 
         nearsay_db.clone().start_nightly_cleanup_job().await;
 
@@ -87,7 +87,7 @@ impl NearsayDB {
         println!("delete old posts result: {:?}", delete_old_posts_res);
         
         self.cache.flush_all_posts().await.unwrap();
-        println!("cleared map layers cache");
+        println!("cleared posts in map cache");
         
         let mut all_posts = self.mongo_db.collection::<Post>("posts").find(doc! {}).await?;
         
@@ -381,9 +381,9 @@ impl NearsayDB {
         }   
     }
 
-    pub async fn geoquery_post_pts(&mut self, layer: usize, within: &Rect) -> Result<Vec<Cluster>, MongoError> {
+    pub async fn geoquery_post_pts(&mut self, zoom: usize, within: &Rect) -> Result<Vec<Cluster>, MongoError> {
         
-        if let Ok(posts) = self.cache.geoquery_post_pts(layer, within).await {
+        if let Ok(posts) = self.cache.geoquery_post_pts(zoom, within).await {
             return Ok(posts);
         }
 
@@ -395,8 +395,8 @@ impl NearsayDB {
         }
 
         // don't cluster if zoomed all the way in
-        if layer == MAX_ZOOM_LEVEL { Ok(res) }
-        else { Ok(cluster(&res[..], get_cluster_radius_degrees(layer)))  }
+        if zoom == MAX_ZOOM_LEVEL { Ok(res) }
+        else { Ok(cluster(&res[..], get_cluster_radius_degrees(zoom)))  }
     }
 
     pub async fn geoquery_users(&mut self, within: &Rect) -> Result<Vec<UserPOI>, Box<dyn std::error::Error>> {

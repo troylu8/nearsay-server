@@ -5,18 +5,19 @@ use redis::aio::MultiplexedConnection;
 use redis::{from_redis_value, AsyncCommands, Cmd, Pipeline, RedisResult, Value};
 use redis::geo::{Coord, Unit};
 use serde::Serialize;
+use thousands::Separable;
 
 use crate::area::Rect;
 use crate::cluster::{get_cluster_radius_meters, merge_clusters, Cluster};
 
-const MIN_CACHED_LAYER: usize = 3;
-const MAX_CACHED_LAYER: usize = 5;
-const LAYERS_COUNT: usize = MAX_CACHED_LAYER - MIN_CACHED_LAYER + 1;
+const MIN_CACHED_ZOOM_LEVEL: usize = 3;
+const MAX_CACHED_ZOOM_LEVEL: usize = 5;
+const CACHED_ZOOM_LEVELS: usize = MAX_CACHED_ZOOM_LEVEL - MIN_CACHED_ZOOM_LEVEL + 1;
 
 /// `radius` in meters
-fn geoquery_radius<'a>(pipeline: &'a mut Pipeline, layer: usize, x: f64, y: f64, radius: f64) -> &'a mut Pipeline {
+fn geoquery_radius<'a>(pipeline: &'a mut Pipeline, zoom: usize, x: f64, y: f64, radius: f64) -> &'a mut Pipeline {
     pipeline.cmd("GEOSEARCH")
-            .arg(format!("L{layer}"))
+            .arg(format!("Z{zoom}"))
             .arg("FROMLONLAT")
             .arg(x)
             .arg(y)
@@ -28,25 +29,25 @@ fn geoquery_radius<'a>(pipeline: &'a mut Pipeline, layer: usize, x: f64, y: f64,
 
 // let mut res = vec![];
 //     for search_res in search_results {
-//         res.push(self.search_res_to_cluster(layer, search_res, true).await?);
+//         res.push(self.search_res_to_cluster(zoom, search_res, true).await?);
 //     }
-fn get_cluster_size<'a>(pipeline: &'a mut Pipeline, layer: usize, cluster_id: &str) -> &'a mut Pipeline {
-    pipeline.get(format!("size:L{layer}:{cluster_id}"))
+fn get_cluster_size<'a>(pipeline: &'a mut Pipeline, zoom: usize, cluster_id: &str) -> &'a mut Pipeline {
+    pipeline.get(format!("size:Z{zoom}:{cluster_id}"))
 }
-fn set_cluster_size<'a>(pipeline: &'a mut Pipeline, layer: usize, cluster_id: &str, size: usize) -> &'a mut Pipeline {
-    pipeline.set(format!("size:L{layer}:{cluster_id}"), size).ignore()
+fn set_cluster_size<'a>(pipeline: &'a mut Pipeline, zoom: usize, cluster_id: &str, size: usize) -> &'a mut Pipeline {
+    pipeline.set(format!("size:Z{zoom}:{cluster_id}"), size).ignore()
 }
-fn del_cluster_size<'a>(pipeline: &'a mut Pipeline, layer: usize, cluster_id: &str) -> &'a mut Pipeline {
-    pipeline.del(format!("size:L{layer}:{cluster_id}")).ignore()
+fn del_cluster_size<'a>(pipeline: &'a mut Pipeline, zoom: usize, cluster_id: &str) -> &'a mut Pipeline {
+    pipeline.del(format!("size:Z{zoom}:{cluster_id}")).ignore()
 }
 
-fn add_cluster<'a>(pipeline: &'a mut Pipeline, layer: usize, cluster_id: &str, x: f64, y: f64) -> &'a mut Pipeline {
-    pipeline.geo_add(format!("L{layer}"), (Coord::lon_lat(x, y), cluster_id)).ignore()
+fn add_cluster<'a>(pipeline: &'a mut Pipeline, zoom: usize, cluster_id: &str, x: f64, y: f64) -> &'a mut Pipeline {
+    pipeline.geo_add(format!("Z{zoom}"), (Coord::lon_lat(x, y), cluster_id)).ignore()
 }
 /// note: doesn't delete shared `blurb` value!
-fn del_cluster<'a>(mut pipeline: &'a mut Pipeline, layer: usize, cluster_id: &str) -> &'a mut Pipeline {
-    pipeline = pipeline.zrem(format!("L{layer}"), cluster_id).ignore();
-    del_cluster_size(pipeline, layer, cluster_id)
+fn del_cluster<'a>(mut pipeline: &'a mut Pipeline, zoom: usize, cluster_id: &str) -> &'a mut Pipeline {
+    pipeline = pipeline.zrem(format!("Z{zoom}"), cluster_id).ignore();
+    del_cluster_size(pipeline, zoom, cluster_id)
 }
 
 fn get_blurb<'a>(pipeline: &'a mut Pipeline, cluster_id: &str) -> &'a mut Pipeline {
@@ -84,17 +85,20 @@ fn geosearch_cmd(key: &str, within: &Rect) -> Cmd {
     let mid_x = (within.left + within.right) / 2.0;
     let mid_y = (within.top + within.bottom) / 2.0;
     
-    let width_meters = 
-        if within.bottom > 0.0 { // northern hemisphere: width = bottom left -> bottom right
-            Location::new(within.left, within.bottom).haversine_distance_to(&Location::new(within.right, within.bottom)).meters()
+    let width_meters =
+        if within.bottom >= 0.0 { // north hemisphere
+            Location::new(within.bottom, within.left).haversine_distance_to(&Location::new(within.bottom, within.right)).meters() 
         }
-        else { // southern hemisphere or around equator: width = top left -> top right, in meters 
-            Location::new(within.left, within.top).haversine_distance_to(&Location::new(within.right, within.top)).meters() 
+        else if within.top <= 0.0 { // south hemisphere 
+            Location::new(within.top, within.left).haversine_distance_to(&Location::new(within.top, within.right)).meters()
+        }
+        else { // around equator
+            Location::new(0.0, within.left).haversine_distance_to(&Location::new(0.0, within.right)).meters()
         };
 
     // height = middle top -> middle bottom, in meters
-    let height_meters = Location::new(mid_x, within.top).haversine_distance_to(&Location::new(mid_x, within.bottom)).meters();
-
+    let height_meters = Location::new(within.top, mid_x).haversine_distance_to(&Location::new(within.bottom, mid_x)).meters();
+    
     redis::cmd("GEOSEARCH")
         .arg(key)
         .arg("FROMLONLAT")
@@ -110,11 +114,11 @@ fn geosearch_cmd(key: &str, within: &Rect) -> Cmd {
 
 
 #[derive(Debug, Clone)]
-pub struct MapLayersCache {
+pub struct MapCache {
     posts_cache: MultiplexedConnection,
     users_cache: MultiplexedConnection,
 }
-impl MapLayersCache {
+impl MapCache {
 
     pub async fn new() -> Result<Self, Box<dyn Error>> {
         Ok(
@@ -129,27 +133,27 @@ impl MapLayersCache {
         
         // get ids and positions of nearby clusters
         let mut pipe_geoquery = &mut redis::pipe();
-        for layer in MIN_CACHED_LAYER..=MAX_CACHED_LAYER {
-            pipe_geoquery = geoquery_radius(pipe_geoquery, layer, x, y, get_cluster_radius_meters(layer));
+        for zoom in MIN_CACHED_ZOOM_LEVEL..=MAX_CACHED_ZOOM_LEVEL {
+            pipe_geoquery = geoquery_radius(pipe_geoquery, zoom, x, y, get_cluster_radius_meters(zoom));
         }
-        // nearby_clusters[x] = (id, pos) of each nearby cluster on layer x
-        let nearby_clusters: [ Vec<(String, (f64, f64))> ; LAYERS_COUNT] = pipe_geoquery.query_async(&mut self.posts_cache).await?;
+        // nearby_clusters[x] = (id, pos) of each nearby cluster on zoom x
+        let nearby_clusters: [ Vec<(String, (f64, f64))> ; CACHED_ZOOM_LEVELS] = pipe_geoquery.query_async(&mut self.posts_cache).await?;
         let mut nearby_clusters_ids = HashSet::new();
         
         let mut pipe_nearby = &mut redis::pipe();
         
-        let mut layers_new_cluster_was_merged_on = [false; LAYERS_COUNT];
+        let mut zooms_new_cluster_was_merged_on = [false; CACHED_ZOOM_LEVELS];
         
-        // for each layer...
-        for (i, nearby_clusters_in_layer) in nearby_clusters.iter().enumerate() {
-            let layer = i + MIN_CACHED_LAYER;
+        // for each zoom level...
+        for (i, nearby_clusters_in_zoom) in nearby_clusters.iter().enumerate() {
+            let zoom = i + MIN_CACHED_ZOOM_LEVEL;
             
             // get sizes of nearby clusters + delete them
-            for (nearby_id, _) in nearby_clusters_in_layer {
-                pipe_nearby = get_cluster_size(pipe_nearby, layer, &nearby_id);
-                pipe_nearby = del_cluster(pipe_nearby, layer, &nearby_id);
+            for (nearby_id, _) in nearby_clusters_in_zoom {
+                pipe_nearby = get_cluster_size(pipe_nearby, zoom, &nearby_id);
+                pipe_nearby = del_cluster(pipe_nearby, zoom, &nearby_id);
                 nearby_clusters_ids.insert(nearby_id);
-                layers_new_cluster_was_merged_on[i] = true;
+                zooms_new_cluster_was_merged_on[i] = true;
             }
         }
 
@@ -158,9 +162,9 @@ impl MapLayersCache {
         
         let mut pipe_save = &mut redis::pipe(); // saves new cluster + its size, gets cluster sizes of nearby clusters after merging
         
-        // for each layer...
-        for (layer, nearby_clusters_in_layer) in nearby_clusters.iter().enumerate() {
-            let layer = layer + MIN_CACHED_LAYER;
+        // for each zoom level...
+        for (zoom, nearby_clusters_in_zoom) in nearby_clusters.iter().enumerate() {
+            let zoom = zoom + MIN_CACHED_ZOOM_LEVEL;
             
             // create a new cluster
             let mut new_x = x;
@@ -168,20 +172,20 @@ impl MapLayersCache {
             let mut new_size = 1;
             
             // merge all nearby clusters into the new cluster
-            for (_, (nearby_x, nearby_y)) in nearby_clusters_in_layer {
+            for (_, (nearby_x, nearby_y)) in nearby_clusters_in_zoom {
                 (new_x, new_y, new_size) = merge_clusters(new_x, new_y, new_size, *nearby_x, *nearby_y, nearby_cluster_sizes[sizes_i]);
                 sizes_i += 1;
             }
             
             // save new cluster and its size to redis
-            pipe_save = add_cluster(pipe_save, layer, cluster_id, new_x, new_y);
-            pipe_save = set_cluster_size(pipe_save, layer, cluster_id, new_size);
+            pipe_save = add_cluster(pipe_save, zoom, cluster_id, new_x, new_y);
+            pipe_save = set_cluster_size(pipe_save, zoom, cluster_id, new_size);
         }
         
-        // get the size of each deleted cluster on each layer
+        // get the size of each deleted cluster on each zoom
         for id in &nearby_clusters_ids {
-            for layer in MIN_CACHED_LAYER..=MAX_CACHED_LAYER {
-                pipe_save = get_cluster_size(pipe_save, layer, id);
+            for zoom in MIN_CACHED_ZOOM_LEVEL..=MAX_CACHED_ZOOM_LEVEL {
+                pipe_save = get_cluster_size(pipe_save, zoom, id);
             }
         }
         
@@ -193,9 +197,9 @@ impl MapLayersCache {
         
         for deleted_cluster_id in &nearby_clusters_ids {
             
-            // a blurb is required if the cluster is a single on any layer
+            // a blurb is required if the cluster is a single on any zoom
             let mut blurb_required = false; 
-            for _ in 0..LAYERS_COUNT {
+            for _ in 0..CACHED_ZOOM_LEVELS {
                 if let Some(1) = nearby_cluster_sizes[sizes_i] {
                     blurb_required = true;
                 }
@@ -206,9 +210,9 @@ impl MapLayersCache {
             }
         }
         
-        // save blurb if new cluster didn't do a merge on any layer
-        for merged_on_layer in layers_new_cluster_was_merged_on {
-            if !merged_on_layer {
+        // save blurb if new cluster didn't do a merge on any zoom
+        for merged_on_zoom in zooms_new_cluster_was_merged_on {
+            if !merged_on_zoom {
                 pipe_blurbs = set_blurb(pipe_blurbs, cluster_id, blurb);
                 break;
             }
@@ -220,18 +224,18 @@ impl MapLayersCache {
     }
 
     /// returns `(cluster_id, cluster)`
-    pub async fn geoquery_post_pts(&mut self, layer: usize, within: &Rect) -> Result<Vec<Cluster>, ()> {
-        if layer < MIN_CACHED_LAYER || MAX_CACHED_LAYER < layer { return Err(()) }
+    pub async fn geoquery_post_pts(&mut self, zoom: usize, within: &Rect) -> Result<Vec<Cluster>, ()> {
+        if zoom < MIN_CACHED_ZOOM_LEVEL || MAX_CACHED_ZOOM_LEVEL < zoom { return Err(()) }
 
         let search_results: Vec<(String, (f64, f64))> = 
-            geosearch_cmd(&format!("L{layer}"), within)
+            geosearch_cmd(&format!("Z{zoom}"), within)
             .query_async(&mut self.posts_cache).await.map_err(|_| ())?;
 
         let mut p = &mut redis::pipe();
         
         // for each cluster found, get its size and blurb
         for (cluster_id, _) in &search_results {
-            p = get_cluster_size(p, layer, cluster_id);
+            p = get_cluster_size(p, zoom, cluster_id);
             p = get_blurb(p, cluster_id);
         }
         
@@ -249,16 +253,13 @@ impl MapLayersCache {
                 other => other
             };
             
-            // only attach id and blurb if not attaching size
-            let (id, blurb): (Option<String>, Option<String>) = match size {
-                None => (
-                    Some(cluster_id.clone()),
-                    from_redis_value(&sizes_and_blurbs[i * 2 + 1]).unwrap()
-                ),
-                _ => (None, None)
+            // only attach blurb if not attaching size
+            let blurb: Option<String> = match size {
+                None => from_redis_value(&sizes_and_blurbs[i * 2 + 1]).unwrap(),
+                _ => None
             };
             
-            res.push(Cluster { pos: *pos, size, id, blurb });
+            res.push(Cluster { pos: *pos, size, id: cluster_id.to_string(), blurb });
         }
         
         Ok(res)

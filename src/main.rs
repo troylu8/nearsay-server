@@ -1,6 +1,7 @@
 use std::env;
 
 use area::Rect;
+use geoutils::Location;
 use hmac::{Hmac, Mac};
 use db::NearsayDB;
 use endpoints::get_endpoints_router;
@@ -51,14 +52,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 // async fn main() -> Result<(), ()> {
 
 //     let mut nearsay_db = NearsayDB::new().await;
-        
-//     nearsay_db.insert_guest("abc", 1, &[10.0, 10.0]).await?;
-//     nearsay_db.insert_guest("ccc",2, &[20.0, 10.0]).await?;
-//     println!("{}", nearsay_db.move_user("abc", &[25.0, 10.0]).await?);
-//     nearsay_db.edit_user("abc", &doc! { "username": "new username" }).await.unwrap();
-//     nearsay_db.delete_user("ccc").await?;
-//     let r = nearsay_db.geoquery_users(&Rect { top: 30.0, bottom: 0.0, left: 20.0, right: 25.0 }).await;
-//     println!("{r:?}");
+    
+//     nearsay_db.add_user_to_cache("new", &[100.0, 1.0], 1, None).await?;
+    
+//     // let w = Location::new(0, 135).haversine_distance_to(&Location::new(0, 100)).meters();
+//     // let h = Location::new(22.5, 0.0).haversine_distance_to(&Location::new(0, 0)).meters();
+//     // println!("w {}", w);
+//     // println!("h {}", h);
+    
+//     // println!("d {}", (w * w + h * h).sqrt() );
+//     // let d = Location::new(22.5, 135.0).haversine_distance_to(&Location::new(0, 100)).meters();
+//     // println!("d true {}", d );
+    
+//     let r = nearsay_db.geoquery_users(&Rect { top: 15.0, bottom: -20.0, left: 90.0, right: 180.0 }).await;
+//     // println!("{r:?}");
     
 //     Ok(())
 // }

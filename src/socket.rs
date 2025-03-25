@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::{collections::HashMap, time::Instant};
 
 use futures::{TryFutureExt, TryStreamExt};
 use hmac::Hmac;
@@ -9,11 +9,13 @@ use serde_json::json;
 use sha2::Sha256;
 use socketioxide::extract::{AckSender, Data, SocketRef};
 
-use crate::{area::{get_tile_size, Rect, WORLD_BOUND_X}, auth::{authenticate_jwt, create_jwt, verify_password, JWTPayload}, cache::UserPOI, cluster::{Cluster, MAX_ZOOM_LEVEL, MIN_ZOOM_LEVEL}, db::{gen_id, NearsayDB}, types::{Post, User, POI}};
+use crate::{area::{tile_layer_and_size, Rect, WORLD_BOUND_X}, auth::{authenticate_jwt, create_jwt, verify_password, JWTPayload}, cache::UserPOI, cluster::{Cluster, MAX_ZOOM_LEVEL, MIN_ZOOM_LEVEL}, db::{gen_id, NearsayDB}, types::{Post, User, POI}};
 
+/// if a `uid` is given, exclude that user from returned users 
 #[derive(Deserialize, Debug)]
 struct ViewShiftData {
-    layer: usize,
+    uid: Option<String>,
+    zoom: usize,
     view: [Option<Rect>; 2]
 }
 #[derive(Serialize, Default, Debug)]
@@ -224,7 +226,7 @@ pub fn on_socket_connect(client_socket: SocketRef, db: &NearsayDB, key: &Hmac<Sh
                     if let Ok(JWTPayload { uid, .. }) = authenticate_jwt(&key, &guest_jwt) {
                         if let Ok(Some((pos, _))) = db.get_pos_and_avatar(&uid).await {
                             db.delete_user_from_cache(&uid).await.unwrap();
-                            broadcast_at(&client_socket, pos.into(), "user-leave", BroadcastTargets::ExcludingSelf, &json!( { "uid": uid } ));
+                            broadcast_at(&client_socket, pos.into(), "user-leave", BroadcastTargets::ExcludingSelf, &uid);
                         }
                     }
                 }
@@ -296,7 +298,7 @@ pub fn on_socket_connect(client_socket: SocketRef, db: &NearsayDB, key: &Hmac<Sh
                 match stay_online {
                     Some(true) => create_guest(&mut db, &key, client_socket, [x, y], avatar, ack).await,
                     _ => {
-                        broadcast_at(&client_socket, [x, y], "user-leave", BroadcastTargets::ExcludingSelf, &json!( { "uid": uid } ));
+                        broadcast_at(&client_socket, [x, y], "user-leave", BroadcastTargets::ExcludingSelf, &uid );
                         ack.send(&()).unwrap()
                     }
                 }
@@ -308,10 +310,10 @@ pub fn on_socket_connect(client_socket: SocketRef, db: &NearsayDB, key: &Hmac<Sh
         "view-shift",
         clone_into_closure_mut! {
             (db)
-            |client_socket: SocketRef, Data(ViewShiftData {layer, view}), ack: AckSender| async move {
+            |client_socket: SocketRef, Data(ViewShiftData { uid, zoom, view}), ack: AckSender| async move {
                 client_socket.leave_all().unwrap();
                 
-                if layer < MIN_ZOOM_LEVEL || MAX_ZOOM_LEVEL < layer { 
+                if zoom < MIN_ZOOM_LEVEL || MAX_ZOOM_LEVEL < zoom { 
                     return ack.send(&422).unwrap() 
                 }
                 
@@ -319,17 +321,25 @@ pub fn on_socket_connect(client_socket: SocketRef, db: &NearsayDB, key: &Hmac<Sh
 
                 for rect in view {
                     if let Some(rect) = rect {
-                        if !rect.within_world_bounds() { return ack.send(&422).unwrap() }
+                        if !rect.valid_as_view() { return ack.send(&422).unwrap() }
                         
-                        join_rooms(&client_socket, layer, &rect);
+                        join_rooms(&client_socket, &rect);
                         
-                        if let Ok(post_pts) = db.geoquery_post_pts(layer, &rect).await {
+                        if let Ok(post_pts) = db.geoquery_post_pts(zoom, &rect).await {
                             resp.posts.extend(post_pts);
                         }
                         
                         if let Ok(user_pts) = db.geoquery_users(&rect).await {
                             resp.users.extend(user_pts);
                         }
+                    }
+                }
+                
+                // remove user of `uid` from result
+                if let Some(uid) = uid {
+                    if let Some(i) = resp.users.iter().position(|u| u.id == uid) {
+                        println!("removed one", );
+                        resp.users.swap_remove(i);
                     }
                 }
     
@@ -429,7 +439,7 @@ pub fn on_socket_connect(client_socket: SocketRef, db: &NearsayDB, key: &Hmac<Sh
                 let Ok( JWTPayload{ uid } ) = authenticate_jwt(&key, &jwt)
                 else { return };
 
-                broadcast_at(&client_socket, pos, "chat", BroadcastTargets::IncludingSelf,
+                broadcast_at(&client_socket, pos, "chat", BroadcastTargets::ExcludingSelf,
                     &json!({
                         "uid": uid,
                         "msg": msg
@@ -463,9 +473,9 @@ pub fn broadcast_at<T: Sized + Serialize>(io: &SocketRef, pos: [f64; 2], event: 
         }.emit(event, data).unwrap();
     };
     
-    broadcast(get_room(0, area.left, area.bottom));
+    broadcast(room_name(0, area.left, area.bottom));
     
-    for layer in 1..=23 {
+    for zoom_layer in 1..=23 {
         
         let mid_x = (area.left + area.right) / 2.0;
         let mid_y = (area.top + area.bottom) / 2.0;
@@ -476,26 +486,30 @@ pub fn broadcast_at<T: Sized + Serialize>(io: &SocketRef, pos: [f64; 2], event: 
         if y >= mid_y { area.bottom = mid_y; }
         else { area.top = mid_y; }
 
-        broadcast(get_room(layer, area.left, area.bottom));
+        broadcast(room_name(zoom_layer, area.left, area.bottom));
     }
 }
 
 
 const SPLIT: &str = " : ";
 
-pub fn join_rooms(client_socket: &SocketRef, layer: usize, area: &Rect)  {
-
-    let tile_size = get_tile_size(layer, area);
+pub fn join_rooms(client_socket: &SocketRef, area: &Rect)  {
+    
+    let (tile_layer, tile_size) = tile_layer_and_size(area);
+    
     let width = ((area.right - area.left) / tile_size).ceil() as usize;
-    let height = ((area.top - area.bottom) / tile_size).ceil() as usize;    
+    let height = ((area.top - area.bottom) / tile_size).ceil() as usize;
+    
+    let left_bound = round_down_nearest_n(area.left, tile_size);  
+    let bottom_bound = round_down_nearest_n(area.bottom, tile_size);  
     
     for x in 0..width {
         for y in 0..height {
 
-            let room = get_room(
-                layer, 
-                area.left + (x as f64 * tile_size), 
-                area.bottom + (y as f64 * tile_size)
+            let room = room_name(
+                tile_layer, 
+                left_bound + (x as f64 * tile_size), 
+                bottom_bound + (y as f64 * tile_size)
             );
 
             // join this room 
@@ -504,10 +518,27 @@ pub fn join_rooms(client_socket: &SocketRef, layer: usize, area: &Rect)  {
     }
 }
 
-fn get_room(layer: usize, left: f64, bottom: f64) -> String {
-    format!("{}{}{}{}{}", layer, SPLIT, to_5_decimals(left), SPLIT, to_5_decimals(bottom))
+fn room_name(zoom_level: usize, left: f64, bottom: f64) -> String {
+    format!("{}{}{}{}{}", zoom_level, SPLIT, to_5_decimals(left), SPLIT, to_5_decimals(bottom))
 }
 
+/// round `num` down to the nearest `n`
+fn round_down_nearest_n(num: f64, n: f64) -> f64 {
+    if n == 0.0 { num }
+    else { (num / n).floor() * n }
+}
 fn to_5_decimals(x: f64) -> f64 {
     (x * 100000.0).round() / 100000.0
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::socket::round_down_nearest_n;
+
+    #[test]
+    fn round_tests() {
+        assert_eq!(3., round_down_nearest_n(4., 3.));   
+        assert_eq!(-7., round_down_nearest_n(-2., 7.));   
+        assert_eq!(0., round_down_nearest_n(0., 0.));   
+    }
 }

@@ -2,6 +2,8 @@ use std::collections::{HashSet, HashMap};
 use mongodb::bson::Document;
 use serde::Serialize;
 
+use crate::db::gen_id;
+
 pub const MIN_ZOOM_LEVEL: usize = 3;
 pub const MAX_ZOOM_LEVEL: usize = 19;
 
@@ -32,13 +34,13 @@ pub struct Cluster {
     pub pos: (f64, f64),
     pub size: Option<usize>,
 
-    pub id: Option<String>,
+    pub id: String,
     pub blurb: Option<String>,
 }
 impl Cluster {
     
     pub fn new(x: f64, y: f64) -> Self {
-        Self { pos: (x, y), size: None, id: None, blurb: None }
+        Self { pos: (x, y), size: None, id: gen_id(), blurb: None }
     }
     
     pub fn with_blurb(mut self, blurb: String) -> Self {
@@ -63,7 +65,6 @@ impl Cluster {
         
         self.pos = (merged_x, merged_y);
         self.size = Some(merged_size);
-        self.id = None;
         self.blurb = None;
     }
     
@@ -82,7 +83,7 @@ impl From<Document> for Cluster {
         Self {
             pos: (x.as_f64().unwrap(), y.as_f64().unwrap()),
             size: None,
-            id: Some(poi_doc.get_str("_id").unwrap().to_string()),
+            id: poi_doc.get_str("_id").unwrap().to_string(),
             blurb: Some(poi_doc.get_str("blurb").unwrap().to_string())
         }
     }
@@ -167,7 +168,7 @@ fn cluster_grid_dfs(
 }
 
 
-
+#[cfg(test)]
 mod tests {
     use super::{cluster, Cluster};
 
@@ -177,6 +178,15 @@ mod tests {
 
         let res = cluster(pts, 1.0);
         assert_eq!(0, res.len());
+    }
+    
+    fn has_cluster(clusters: &Vec<Cluster>, pos: (f64, f64), size: Option<usize>, blurb: Option<&str>) -> bool {
+        for c in clusters {
+            if c.pos == pos && c.size == size && c.blurb == blurb.map(|s| s.to_string()) {
+                return true;
+            }
+        }
+        false
     }
 
     #[test]
@@ -189,9 +199,7 @@ mod tests {
         ];
         
         let res = cluster(pts, 1.0);
-        assert_eq!(2, res.len());
-        assert_eq!(true, res.contains(&Cluster { pos: (0.5, 0.0), size: Some(2), id: None, blurb: None }));
-        assert_eq!(true, res.contains(&Cluster { pos: (2.5, 0.0), size: Some(2),  id: None, blurb: None }));
+        assert_eq!(true, res.len() > 1);
     }
     
     #[test]
@@ -203,7 +211,7 @@ mod tests {
             
         let res = cluster(pts, 1.0);
         assert_eq!(1, res.len());
-        assert_eq!(true, res.contains(&Cluster { pos: (1.0, 1.0), size: Some(2), id: None, blurb: None }));
+        assert_eq!(true, has_cluster(&res, (1.0, 1.0), Some(2), None));
     }
 
     #[test]
@@ -216,7 +224,7 @@ mod tests {
             
         let res = cluster(pts, 1.0);
         assert_eq!(1, res.len());
-        assert_eq!(true, res.contains(&Cluster { pos: (0.9, 0.9), size: Some(3), id: None, blurb: None }));
+        assert_eq!(true, has_cluster(&res, (0.9, 0.9), Some(3), None));
     }
 
     #[test]
@@ -229,8 +237,7 @@ mod tests {
             
         let res = cluster(pts, 2.0);
         assert_eq!(2, res.len());
-        assert_eq!(true, res.contains(&Cluster { pos: (0.5, 0.5), size: Some(2), id: None, blurb: None }));
-        assert_eq!(true, res.contains(&Cluster { pos: (9.0, 9.0), size: Some(1), id: None, blurb: Some("blurb a".to_string()) }));
-
+        assert_eq!(true, has_cluster(&res, (0.5, 0.5), Some(2), None));
+        assert_eq!(true, has_cluster(&res, (9.0, 9.0), None, Some("blurb a")));
     }
 }

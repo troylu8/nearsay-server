@@ -20,6 +20,7 @@ serde = "1.0.215"
 serde_json = "1.0.133"
 sha2 = "0.10.8"
 socketioxide = "0.15.1"
+thousands = "0.2.0"
 tokio = {version = "1.41.1", features = ["rt-multi-thread"] }
 tokio-cron-scheduler = "0.13.0"
 tower = "0.5.2"
