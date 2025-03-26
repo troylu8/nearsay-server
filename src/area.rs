@@ -3,6 +3,9 @@ use serde::{Serialize, Deserialize};
 
 pub const WORLD_BOUND_X: f64 = 180.0;
 pub const WORLD_BOUND_Y: f64 = 90.0;
+pub const WORLD_MAX_BOUND: f64 = 180.0; 
+
+pub const MAX_TILE_LAYER: usize = 16;
 
 /// returns `(tile layer, tile size)`
 pub fn tile_layer_and_size(rect: &Rect) -> (usize, f64) {
@@ -11,9 +14,9 @@ pub fn tile_layer_and_size(rect: &Rect) -> (usize, f64) {
     if limit == 0.0 { panic!("rect needs either width or height to be >= 1") }
     
     let mut layer = 0;
-    let mut size = WORLD_BOUND_X * 2.0;
+    let mut size = WORLD_MAX_BOUND * 2.0;  
     
-    while size > limit {
+    while size > limit && layer < MAX_TILE_LAYER {
         size /= 2.0;
         layer += 1;
     }
