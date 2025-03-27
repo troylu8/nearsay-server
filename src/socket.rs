@@ -9,13 +9,14 @@ use serde_json::json;
 use sha2::Sha256;
 use socketioxide::{extract::{AckSender, Data, SocketRef}, operators::BroadcastOperators};
 
-use crate::{area::{tile_layer_and_size, Rect, MAX_TILE_LAYER, WORLD_MAX_BOUND}, auth::{authenticate_jwt, create_jwt, verify_password, JWTPayload}, cache::UserPOI, cluster::{Cluster, MAX_ZOOM_LEVEL, MIN_ZOOM_LEVEL}, db::{gen_id, NearsayDB}, types::{Post, User, POI}};
+use crate::{area::{get_tile_layer_and_size, Rect, MAX_TILE_LAYER, WORLD_MAX_BOUND}, auth::{authenticate_jwt, create_jwt, verify_password, JWTPayload}, cache::UserPOI, cluster::{Cluster, MAX_ZOOM_LEVEL, MIN_ZOOM_LEVEL}, db::{gen_id, NearsayDB}, types::{Post, User, POI}};
 
 /// if a `uid` is given, exclude that user from returned users 
 #[derive(Deserialize, Debug)]
 struct ViewShiftData {
     uid: Option<String>,
     zoom: usize,
+    tile_layer: usize,
     view: [Option<Rect>; 2]
 }
 #[derive(Serialize, Default, Debug)]
@@ -310,7 +311,7 @@ pub fn on_socket_connect(client_socket: SocketRef, db: &NearsayDB, key: &Hmac<Sh
         "view-shift",
         clone_into_closure_mut! {
             (db)
-            |client_socket: SocketRef, Data(ViewShiftData { uid, zoom, view}), ack: AckSender| async move {
+            |client_socket: SocketRef, Data(ViewShiftData { uid, zoom, tile_layer, view}), ack: AckSender| async move {
                 client_socket.leave_all().unwrap();
                 
                 if zoom < MIN_ZOOM_LEVEL || MAX_ZOOM_LEVEL < zoom { 
@@ -319,17 +320,17 @@ pub fn on_socket_connect(client_socket: SocketRef, db: &NearsayDB, key: &Hmac<Sh
                 
                 let mut resp = ViewShiftResponse::default();
 
-                for rect in view {
-                    if let Some(rect) = rect {
-                        if !rect.valid_as_view() { return ack.send(&422).unwrap() }
+                for aligned_rect in view {
+                    if let Some(aligned_rect) = aligned_rect {
+                        if !aligned_rect.valid_as_view() { return ack.send(&422).unwrap() }
                         
-                        join_rooms(&client_socket, &rect);
+                        join_rooms(&client_socket, tile_layer, &aligned_rect);
                         
-                        if let Ok(post_pts) = db.geoquery_post_pts(zoom, &rect).await {
+                        if let Ok(post_pts) = db.geoquery_post_pts(zoom, &aligned_rect).await {
                             resp.posts.extend(post_pts);
                         }
                         
-                        if let Ok(user_pts) = db.geoquery_users(&rect).await {
+                        if let Ok(user_pts) = db.geoquery_users(&aligned_rect).await {
                             resp.users.extend(user_pts);
                         }
                     }
@@ -338,7 +339,6 @@ pub fn on_socket_connect(client_socket: SocketRef, db: &NearsayDB, key: &Hmac<Sh
                 // remove user of `uid` from result
                 if let Some(uid) = uid {
                     if let Some(i) = resp.users.iter().position(|u| u.id == uid) {
-                        println!("removed one", );
                         resp.users.swap_remove(i);
                     }
                 }
@@ -459,6 +459,7 @@ fn broadcast_at_multiple<T: Sized + Serialize>(io: &SocketRef, pts: &[[f64; 2]],
     };
     
     for [x, y] in pts {
+        
         let mut area = Rect {
             left: -(WORLD_MAX_BOUND as f64), // use WORLD_MAX_BOUND instead of WORLD_BOUND_X/Y bc tiles are square
             right: WORLD_MAX_BOUND as f64, 
@@ -488,30 +489,39 @@ fn broadcast_at_multiple<T: Sized + Serialize>(io: &SocketRef, pts: &[[f64; 2]],
 
 const SPLIT: &str = " : ";
 
-pub fn join_rooms(client_socket: &SocketRef, area: &Rect)  {
+pub fn join_rooms(client_socket: &SocketRef, tile_layer: usize, aligned_rect: &Rect)  {
+    println!();
+    println!("joining rooms for {aligned_rect:?}");
     
-    let (tile_layer, tile_size) = tile_layer_and_size(area);
+    let tile_size = (WORLD_MAX_BOUND * 2.0) / 2f64.powf(tile_layer as f64);
+    println!("layer {}, size {}", tile_layer, tile_size);
     
-    let left_bound = round_down_nearest_n(area.left, tile_size);  
-    let right_bound = round_up_nearest_n(area.right, tile_size);  
-    let top_bound = round_up_nearest_n(area.left, tile_size);  
-    let bottom_bound = round_down_nearest_n(area.bottom, tile_size);  
+    // let left_bound = round_down_nearest_n(area.left, tile_size);  
+    // let right_bound = round_up_nearest_n(area.right, tile_size);  
+    // let top_bound = round_up_nearest_n(area.top, tile_size);  
+    // let bottom_bound = round_down_nearest_n(area.bottom, tile_size);  
     
-    let width = ((right_bound - left_bound) / tile_size).round() as usize;
-    let height = ((top_bound - bottom_bound) / tile_size).round() as usize;
+    // let width = ((right_bound - left_bound) / tile_size).round() as usize;
+    // let height = ((top_bound - bottom_bound) / tile_size).round() as usize;
+    let width = ((aligned_rect.right - aligned_rect.left) / tile_size).round() as usize;
+    let height = ((aligned_rect.top - aligned_rect.bottom) / tile_size).round() as usize;
+    
+    println!("{} {}", (aligned_rect.right - aligned_rect.left) / tile_size, (aligned_rect.top - aligned_rect.bottom) / tile_size);
+    println!("{width} {height}", );
     
     for x in 0..width {
         for y in 0..height {
 
             let room = room_name(
                 tile_layer, 
-                left_bound + (x as f64 * tile_size), 
-                bottom_bound + (y as f64 * tile_size)
+                aligned_rect.left + (x as f64 * tile_size), 
+                aligned_rect.bottom + (y as f64 * tile_size)
             );
-
+            
             client_socket.join(room).unwrap();
         }
     }
+    println!("{:#?}", client_socket.rooms());
 }
 
 fn room_name(zoom_level: usize, left: f64, bottom: f64) -> String {
@@ -536,6 +546,9 @@ mod tests {
 
     #[test]
     fn round_tests() {
+        assert_eq!(2., round_up_nearest_n(2., 2.));   
+        assert_eq!(2., round_down_nearest_n(2., 2.)); 
+          
         assert_eq!(3., round_down_nearest_n(4., 3.));   
         assert_eq!(-7., round_down_nearest_n(-2., 7.));   
         assert_eq!(0., round_down_nearest_n(0., 0.));   

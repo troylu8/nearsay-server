@@ -267,7 +267,8 @@ impl NearsayDB {
 
         let blurb = get_blurb_from_body(body);
         
-        self.cache.add_post_pt(&post_id, pos[0], pos[1], &blurb).await.unwrap();
+        self.cache.add_post_pt(&post_id, pos[0], pos[1], &blurb).await
+            .map_err(|e|eprintln!("when adding post pt: {e}"))?;
         
         Ok((post_id, blurb))
     }
