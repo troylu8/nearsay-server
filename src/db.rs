@@ -1,5 +1,5 @@
 
-use std::time::SystemTime;
+use std::{collections::HashMap, time::SystemTime};
 
 use bcrypt::{hash, DEFAULT_COST};
 use futures::{TryFutureExt, TryStreamExt};
@@ -8,6 +8,7 @@ use mongodb::{
 };
 use nearsay_server::NearsayError;
 use serde::{de::DeserializeOwned, Deserialize};
+use socketioxide::extract::SocketRef;
 use tokio_cron_scheduler::{Job, JobScheduler};
 
 use crate::{area::Rect, cache::{MapCache, UserPOI}, cluster::{cluster, get_cluster_radius_degrees, Cluster, MAX_ZOOM_LEVEL}, types::{get_blurb_from_body, Guest, Post, User, UserType, Vote, VoteKind, POI}};
@@ -27,9 +28,11 @@ pub struct NearsayDB {
 }
 impl NearsayDB {
     pub async fn new() -> Self {
-        let mongo_db = Client::with_uri_str("mongodb://localhost:27017").await.unwrap().database("nearsay");
-        let nearsay_db = Self { cache: MapCache::new().await.unwrap(), mongo_db };
-
+        let nearsay_db = Self { 
+            cache: MapCache::new().await.unwrap(), 
+            mongo_db: Client::with_uri_str("mongodb://localhost:27017").await.unwrap().database("nearsay")
+        };
+        
         nearsay_db.clone().start_nightly_cleanup_job().await;
 
         nearsay_db
@@ -122,18 +125,14 @@ impl NearsayDB {
         })
     }
     
-    
-    
-    pub async fn add_user_to_cache(&mut self, uid: &str, pos: &[f64], avatar: usize, username: Option<&str>) -> Result<(), ()> {
-        self.cache.add_user(uid, pos[0], pos[1], avatar, username).await
+    pub async fn add_user_to_cache(&mut self, uid: &str, socket_id: &str, pos: &[f64], avatar: usize, username: Option<&str>) -> Result<(), ()> {
+        self.cache.add_user(uid, socket_id, pos[0], pos[1], avatar, username).await
         .map_err(|e| eprintln!("when adding user to cache: {e}"))
     }
     
-    pub async fn delete_user_from_cache(&mut self, uid: &str) -> Result<(), ()> {
-        self.cache.del_user(uid).await.map_err(|e| {
-            eprintln!("when deleting user from cache: {e}");
-            ()
-        })
+    pub async fn delete_user_from_cache(&mut self, uid: Option<&str>, socket_id: &str) -> Result<(), ()> {
+        self.cache.del_user(uid, socket_id).await
+        .map_err(|e| eprintln!("when deleting user from cache: {e}"))
     }
 
     pub async fn insert_user(&mut self, uid: &str, username: &str, password: &str, avatar: usize) -> Result<(), NearsayError> {
@@ -209,8 +208,10 @@ impl NearsayDB {
         Ok(())
     }
 
-    pub async fn delete_user(&mut self, uid: &str) -> Result<(), ()> {
-        self.delete_user_from_cache(uid).await?;
+    pub async fn delete_user(&mut self, uid: &str, socket_id: Option<&str>) -> Result<(), ()> {
+        if let Some(socket_id) = socket_id {
+            self.delete_user_from_cache(Some(uid), socket_id).await?;
+        }
         
         self.delete("users", uid).await?;
 
@@ -267,8 +268,8 @@ impl NearsayDB {
 
         let blurb = get_blurb_from_body(body);
         
-        self.cache.add_post_pt(&post_id, pos[0], pos[1], &blurb).await
-            .map_err(|e|eprintln!("when adding post pt: {e}"))?;
+        self.cache.add_post_pt(&post_id, pos[0], pos[1], &blurb).await.unwrap();
+            // .map_err(|e| eprintln!("when adding post pt: {e}"))?;
         
         Ok((post_id, blurb))
     }

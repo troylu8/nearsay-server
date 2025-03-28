@@ -1,4 +1,4 @@
-use std::{collections::HashMap, time::Instant};
+use std::{collections::HashMap, sync::Arc, time::Instant};
 
 use futures::{TryFutureExt, TryStreamExt};
 use hmac::Hmac;
@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use nearsay_server::{clone_into_closure, clone_into_closure_mut};
 use serde_json::json;
 use sha2::Sha256;
-use socketioxide::{extract::{AckSender, Data, SocketRef}, operators::BroadcastOperators};
+use socketioxide::{extract::{AckSender, Data, SocketRef}, operators::BroadcastOperators, socket::DisconnectReason};
 
 use crate::{area::{get_tile_layer_and_size, Rect, MAX_TILE_LAYER, WORLD_MAX_BOUND}, auth::{authenticate_jwt, create_jwt, verify_password, JWTPayload}, cache::UserPOI, cluster::{Cluster, MAX_ZOOM_LEVEL, MIN_ZOOM_LEVEL}, db::{gen_id, NearsayDB}, types::{Post, User, POI}};
 
@@ -99,13 +99,12 @@ struct ChatData {
 }
 
 pub fn on_socket_connect(client_socket: SocketRef, db: &NearsayDB, key: &Hmac<Sha256>) {
-    
     async fn create_guest(db: &mut NearsayDB, key: &Hmac<Sha256>, client_socket: SocketRef, pos: [f64; 2], avatar: usize, ack: AckSender) {
         let uid = gen_id();
         
         let Ok(jwt) = create_jwt(&key, uid.clone()) else { return ack.send(&500).unwrap(); };
         
-        if db.add_user_to_cache(&uid, &pos, avatar, None).await.is_ok() {
+        if db.add_user_to_cache(&uid, client_socket.id.as_str(), &pos, avatar, None).await.is_ok() {
             broadcast_at(&client_socket, pos, "user-update", false, 
                 &json! ({
                     "uid": uid,
@@ -165,7 +164,7 @@ pub fn on_socket_connect(client_socket: SocketRef, db: &NearsayDB, key: &Hmac<Sh
     
     async fn enter_world(db: &mut NearsayDB, client_socket: SocketRef, uid: &str, pos: [f64; 2], avatar: usize, username: Option<&str>) -> Result<(), ()> {
         
-        db.add_user_to_cache(uid, &pos, avatar, username).await?;
+        db.add_user_to_cache(uid, client_socket.id.as_str(), &pos, avatar, username).await?;
 
         broadcast_at(&client_socket, pos, "user-enter", false,
             &json! ({
@@ -226,7 +225,7 @@ pub fn on_socket_connect(client_socket: SocketRef, db: &NearsayDB, key: &Hmac<Sh
                 if let Some(guest_jwt) = guest_jwt {
                     if let Ok(JWTPayload { uid, .. }) = authenticate_jwt(&key, &guest_jwt) {
                         if let Ok(Some((pos, _))) = db.get_pos_and_avatar(&uid).await {
-                            db.delete_user_from_cache(&uid).await.unwrap();
+                            db.delete_user_from_cache(Some(&uid), client_socket.id.as_str()).await.unwrap();
                             broadcast_at(&client_socket, pos.into(), "user-leave", false, &uid);
                         }
                     }
@@ -288,8 +287,8 @@ pub fn on_socket_connect(client_socket: SocketRef, db: &NearsayDB, key: &Hmac<Sh
                 };
                 
                 let res = match delete_account {
-                    Some(true) =>   db.delete_user(&uid).await,
-                    _ =>            db.delete_user_from_cache(&uid).await
+                    Some(true) =>   db.delete_user(&uid, Some(client_socket.id.as_str())).await,
+                    _ =>            db.delete_user_from_cache(Some(&uid),  client_socket.id.as_str()).await
                 };
                 if res.is_err() {
                     return ack.send(&500).unwrap();
@@ -414,12 +413,10 @@ pub fn on_socket_connect(client_socket: SocketRef, db: &NearsayDB, key: &Hmac<Sh
 
                 if let Ok((post_id, blurb)) = db.clone().insert_post(author_id, &pos, &body).await {
                     
-                    broadcast_at(&client_socket, pos, "new-poi", true,
+                    broadcast_at(&client_socket, pos, "new-post", true,
                         & json! ({
-                            "_id": post_id.clone(),
+                            "id": post_id,
                             "pos": &pos as &[f64],
-                            "kind": "post",
-            
                             "blurb": blurb,
                         })
                     );
@@ -432,7 +429,7 @@ pub fn on_socket_connect(client_socket: SocketRef, db: &NearsayDB, key: &Hmac<Sh
         "chat",
         clone_into_closure! {
             (key)
-            |client_socket: SocketRef, Data(ChatData { jwt, msg, pos }), ack: AckSender| async move {
+            |client_socket: SocketRef, Data(ChatData { jwt, msg, pos })| async move {
                 let Ok( JWTPayload{ uid } ) = authenticate_jwt(&key, &jwt)
                 else { return };
 
@@ -446,6 +443,14 @@ pub fn on_socket_connect(client_socket: SocketRef, db: &NearsayDB, key: &Hmac<Sh
             }
         }
     );
+    
+    
+    client_socket.on_disconnect(clone_into_closure_mut!(
+        (db)
+        |client_socket: SocketRef| async move {
+            db.delete_user_from_cache(None, client_socket.id.as_str()).await.unwrap();
+        }
+    ));
 }
 
 fn broadcast_at<T: Sized + Serialize>(io: &SocketRef, pos: [f64; 2], event: &str, include_self: bool, data: &T) {
@@ -468,6 +473,7 @@ fn broadcast_at_multiple<T: Sized + Serialize>(io: &SocketRef, pts: &[[f64; 2]],
         };
         
         targets = io.within(room_name(0, area.left, area.bottom));
+        // println!("broadcasting {} to {}", event, room_name(0, area.left, area.bottom));
         
         for tile_layer in 1..=MAX_TILE_LAYER {
             
@@ -481,8 +487,10 @@ fn broadcast_at_multiple<T: Sized + Serialize>(io: &SocketRef, pts: &[[f64; 2]],
             else { area.top = mid_y; }
             
             targets = targets.within(room_name(tile_layer, area.left, area.bottom));
+            // println!("broadcasting {} to {}", event, room_name(tile_layer, area.left, area.bottom));
         }
     }
+    
     
     targets.emit(event, data).unwrap();
 }
@@ -490,24 +498,11 @@ fn broadcast_at_multiple<T: Sized + Serialize>(io: &SocketRef, pts: &[[f64; 2]],
 const SPLIT: &str = " : ";
 
 pub fn join_rooms(client_socket: &SocketRef, tile_layer: usize, aligned_rect: &Rect)  {
-    println!();
-    println!("joining rooms for {aligned_rect:?}");
     
     let tile_size = (WORLD_MAX_BOUND * 2.0) / 2f64.powf(tile_layer as f64);
-    println!("layer {}, size {}", tile_layer, tile_size);
     
-    // let left_bound = round_down_nearest_n(area.left, tile_size);  
-    // let right_bound = round_up_nearest_n(area.right, tile_size);  
-    // let top_bound = round_up_nearest_n(area.top, tile_size);  
-    // let bottom_bound = round_down_nearest_n(area.bottom, tile_size);  
-    
-    // let width = ((right_bound - left_bound) / tile_size).round() as usize;
-    // let height = ((top_bound - bottom_bound) / tile_size).round() as usize;
     let width = ((aligned_rect.right - aligned_rect.left) / tile_size).round() as usize;
     let height = ((aligned_rect.top - aligned_rect.bottom) / tile_size).round() as usize;
-    
-    println!("{} {}", (aligned_rect.right - aligned_rect.left) / tile_size, (aligned_rect.top - aligned_rect.bottom) / tile_size);
-    println!("{width} {height}", );
     
     for x in 0..width {
         for y in 0..height {
@@ -521,7 +516,6 @@ pub fn join_rooms(client_socket: &SocketRef, tile_layer: usize, aligned_rect: &R
             client_socket.join(room).unwrap();
         }
     }
-    println!("{:#?}", client_socket.rooms());
 }
 
 fn room_name(zoom_level: usize, left: f64, bottom: f64) -> String {

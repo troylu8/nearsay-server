@@ -1,4 +1,4 @@
-use std::env;
+use std::{collections::HashMap, env, sync::Arc};
 
 use area::Rect;
 use geoutils::Location;
@@ -29,7 +29,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (socketio_layer, io) = SocketIo::new_layer();
 
     let key = Hmac::new_from_slice(env::var("JWT_SECRET").unwrap().as_bytes()).unwrap();
-
+    
     io.ns("/", clone_into_closure! { 
         (nearsay_db, key) 
         move |client_socket| on_socket_connect(client_socket, &nearsay_db, &key) 

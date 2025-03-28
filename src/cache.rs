@@ -1,9 +1,11 @@
 use std::collections::HashSet;
+use std::time::Duration;
 use std::{error::Error, usize};
 use geoutils::Location;
 use redis::aio::MultiplexedConnection;
 use redis::{from_redis_value, AsyncCommands, Cmd, Pipeline, RedisResult, Value};
 use redis::geo::{Coord, Unit};
+use rslock::LockManager;
 use serde::Serialize;
 use thousands::Separable;
 
@@ -80,6 +82,13 @@ fn del_username<'a>(pipeline: &'a mut Pipeline, uid: &str) -> &'a mut Pipeline {
     pipeline.del(format!("username:{uid}")).ignore()
 }
 
+fn set_socket<'a>(pipeline: &'a mut Pipeline, socket_id: &str, uid: &str) -> &'a mut Pipeline {
+    pipeline.set(format!("socket:{socket_id}"), uid).ignore()
+}
+fn del_socket<'a>(pipeline: &'a mut Pipeline, socket_id: &str) -> &'a mut Pipeline {
+    pipeline.del(format!("socket:{socket_id}")).ignore()
+}
+
 
 fn geosearch_cmd(key: &str, within: &Rect) -> Cmd {
     let mid_x = (within.left + within.right) / 2.0;
@@ -130,6 +139,16 @@ impl MapCache {
     }
     
     pub async fn add_post_pt(&mut self, cluster_id: &str, x: f64, y: f64, blurb: &str) -> Result<(), Box<dyn Error>> {
+        let lock_manager = LockManager::new(vec!["redis://127.0.0.1:6000"]);
+        
+        let lock = loop {
+            if let Ok(lock) = lock_manager
+                .lock("add post pt".as_bytes(), Duration::from_millis(1000))
+                .await
+            {
+                break lock;
+            }
+        };
         
         // get ids and positions of nearby clusters
         let mut pipe_geoquery = &mut redis::pipe();
@@ -137,7 +156,7 @@ impl MapCache {
             pipe_geoquery = geoquery_radius(pipe_geoquery, zoom, x, y, get_cluster_radius_meters(zoom));
         }
         // nearby_clusters[x] = (id, pos) of each nearby cluster on zoom x
-        let nearby_clusters: [ Vec<(String, (f64, f64))> ; CACHED_ZOOM_LEVELS] = pipe_geoquery.query_async(&mut self.posts_cache).await?;
+        let nearby_clusters: [ Vec<(String, (f64, f64))> ; CACHED_ZOOM_LEVELS] = pipe_geoquery.query_async(&mut self.posts_cache).await.unwrap();
         let mut nearby_clusters_ids = HashSet::new();
         
         let mut pipe_nearby = &mut redis::pipe();
@@ -157,7 +176,7 @@ impl MapCache {
             }
         }
 
-        let nearby_cluster_sizes: Vec<usize> = pipe_nearby.query_async(&mut self.posts_cache).await?;
+        let nearby_cluster_sizes: Vec<usize> = pipe_nearby.query_async(&mut self.posts_cache).await.unwrap();
         let mut sizes_i = 0;
         
         let mut pipe_save = &mut redis::pipe(); // saves new cluster + its size, gets cluster sizes of nearby clusters after merging
@@ -191,7 +210,7 @@ impl MapCache {
         
         sizes_i = 0;
         
-        let nearby_cluster_sizes: Vec<Option<usize>> = pipe_save.query_async(&mut self.posts_cache).await?;
+        let nearby_cluster_sizes: Vec<Option<usize>> = pipe_save.query_async(&mut self.posts_cache).await.unwrap();
         
         let mut pipe_blurbs = &mut redis::pipe();
         
@@ -218,7 +237,10 @@ impl MapCache {
             }
         }
         
-        pipe_blurbs.exec_async(&mut self.posts_cache).await?;
+        pipe_blurbs.exec_async(&mut self.posts_cache).await.unwrap();
+        
+        // Unlock the lock
+        lock_manager.unlock(&lock).await;
 
         Ok(())
     }
@@ -314,7 +336,7 @@ impl MapCache {
         Ok(())
     }
     
-    pub async fn add_user(&mut self, uid: &str, x: f64, y: f64, avatar: usize, username: Option<&str>) -> RedisResult<()>  {
+    pub async fn add_user(&mut self, uid: &str, socket_id: &str, x: f64, y: f64, avatar: usize, username: Option<&str>) -> RedisResult<()>  {
         let mut p = &mut redis::pipe();
         
         p.geo_add("users", (Coord::lon_lat(x, y), uid)); // add user to geomap
@@ -322,18 +344,25 @@ impl MapCache {
         if let Some(username) = username {
             p = set_username(p, uid, username);
         }
+        p = set_socket(p, socket_id, uid);
         
         let _: () = p.query_async(&mut self.users_cache).await?;
         
         Ok(())
     }
     
-    pub async fn del_user(&mut self, uid: &str) -> RedisResult<()> {
+    pub async fn del_user(&mut self, uid: Option<&str>, socket_id: &str) -> RedisResult<()> {
         let mut p = &mut redis::pipe();
         
-        p.zrem("users", uid).ignore(); // delete user from geomap
-        p = del_avatar(p, uid);
-        p = del_username(p, uid);
+        let uid = match uid {
+            Some(uid) => uid.to_string(),
+            None => self.users_cache.get(format!("socket:{socket_id}")).await?,
+        };
+        
+        p.zrem("users", &uid).ignore(); // delete user from geomap
+        p = del_avatar(p, &uid);
+        p = del_username(p, &uid);
+        p = del_socket(p, socket_id);
         
         let _: () = p.query_async(&mut self.users_cache).await?;
         
