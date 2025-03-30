@@ -355,7 +355,7 @@ pub fn on_socket_connect(client_socket: SocketRef, db: &NearsayDB, key: &Hmac<Sh
                 let Ok(JWTPayload {uid, ..}) = authenticate_jwt(&key, &jwt) else { return };
                 
                 if let Ok(Some(old_pos)) = db.set_user_pos(&uid, &pos).await {
-                    broadcast_at_multiple(&client_socket, &[old_pos.into(), pos], "user-updated", false, &json!({
+                    broadcast_at_multiple(&client_socket, &[old_pos.into(), pos], "user-update", false, &json!({
                         "uid": uid,
                         "pos": &pos as &[f64]
                     }));
@@ -371,8 +371,9 @@ pub fn on_socket_connect(client_socket: SocketRef, db: &NearsayDB, key: &Hmac<Sh
             |client_socket: SocketRef, Data( EditUserData{ jwt, avatar, username }), ack: AckSender| async move {
                 let Ok(JWTPayload {uid, ..}) = authenticate_jwt(&key, &jwt) else { return };
                 
-                let Ok(Some(user)) = db.get::<User>("users", &uid).await 
-                else { return ack.send(&404).unwrap() };
+                if db.get::<User>("users", &uid).await.is_ok_and(|x| x.is_none()) {
+                    return ack.send(&404).unwrap();
+                }
                 
                 let mut update = doc! {
                     "avatar": avatar,
@@ -382,21 +383,21 @@ pub fn on_socket_connect(client_socket: SocketRef, db: &NearsayDB, key: &Hmac<Sh
                 if let Err(nearsay_err) = db.edit_user(&uid, &update).await {
                     return ack.send(&nearsay_err.to_status_code()).unwrap();
                 }
-
-                if let Some(pos) = user.pos {
+                
+                
+                if let Ok(Some((pos, _))) = db.get_pos_and_avatar(&uid).await {
                     update.insert("uid", uid);
-                    broadcast_at(&client_socket, pos, "user-edited", false, &update);
+                    broadcast_at(&client_socket, pos.into(), "user-edited", false, &update);
                 }
 
                 ack.send(&()).unwrap()
-                
             }
         }
     );
 
     client_socket.on(
         "post",
-        clone_into_closure! {
+        clone_into_closure_mut! {
             (db, key)
             |client_socket: SocketRef, Data(NewPostData {jwt, pos, body})| async move {
                 let author_id_owned;
@@ -410,9 +411,14 @@ pub fn on_socket_connect(client_socket: SocketRef, db: &NearsayDB, key: &Hmac<Sh
                         }
                     }
                 };
-
-                if let Ok((post_id, blurb)) = db.clone().insert_post(author_id, &pos, &body).await {
+                println!("about to broadcast post", );
+                if let Ok((post_id, blurb)) = db.insert_post(author_id, &pos, &body).await {
                     
+                    println!("broadcasting {:#?}", & json! ({
+                        "id": post_id,
+                        "pos": &pos as &[f64],
+                        "blurb": blurb,
+                    }));
                     broadcast_at(&client_socket, pos, "new-post", true,
                         & json! ({
                             "id": post_id,
@@ -473,7 +479,7 @@ fn broadcast_at_multiple<T: Sized + Serialize>(io: &SocketRef, pts: &[[f64; 2]],
         };
         
         targets = io.within(room_name(0, area.left, area.bottom));
-        // println!("broadcasting {} to {}", event, room_name(0, area.left, area.bottom));
+        println!("broadcasting {} to {}", event, room_name(0, area.left, area.bottom));
         
         for tile_layer in 1..=MAX_TILE_LAYER {
             
@@ -487,7 +493,7 @@ fn broadcast_at_multiple<T: Sized + Serialize>(io: &SocketRef, pts: &[[f64; 2]],
             else { area.top = mid_y; }
             
             targets = targets.within(room_name(tile_layer, area.left, area.bottom));
-            // println!("broadcasting {} to {}", event, room_name(tile_layer, area.left, area.bottom));
+            println!("broadcasting {} to {}", event, room_name(tile_layer, area.left, area.bottom));
         }
     }
     
@@ -504,6 +510,8 @@ pub fn join_rooms(client_socket: &SocketRef, tile_layer: usize, aligned_rect: &R
     let width = ((aligned_rect.right - aligned_rect.left) / tile_size).round() as usize;
     let height = ((aligned_rect.top - aligned_rect.bottom) / tile_size).round() as usize;
     
+    println!("\nnew rooms\n", );
+    
     for x in 0..width {
         for y in 0..height {
 
@@ -513,6 +521,7 @@ pub fn join_rooms(client_socket: &SocketRef, tile_layer: usize, aligned_rect: &R
                 aligned_rect.bottom + (y as f64 * tile_size)
             );
             
+            println!("joined {}", room);
             client_socket.join(room).unwrap();
         }
     }
@@ -522,32 +531,6 @@ fn room_name(zoom_level: usize, left: f64, bottom: f64) -> String {
     format!("{}{}{}{}{}", zoom_level, SPLIT, to_5_decimals(left), SPLIT, to_5_decimals(bottom))
 }
 
-fn round_up_nearest_n(num: f64, n: f64) -> f64 {
-    if n == 0.0 { num }
-    else { (num / n).ceil() * n }
-}
-fn round_down_nearest_n(num: f64, n: f64) -> f64 {
-    if n == 0.0 { num }
-    else { (num / n).floor() * n }
-}
 fn to_5_decimals(x: f64) -> f64 {
     (x * 100000.0).round() / 100000.0
-}
-
-#[cfg(test)]
-mod tests {
-    use crate::socket::{round_down_nearest_n, round_up_nearest_n};
-
-    #[test]
-    fn round_tests() {
-        assert_eq!(2., round_up_nearest_n(2., 2.));   
-        assert_eq!(2., round_down_nearest_n(2., 2.)); 
-          
-        assert_eq!(3., round_down_nearest_n(4., 3.));   
-        assert_eq!(-7., round_down_nearest_n(-2., 7.));   
-        assert_eq!(0., round_down_nearest_n(0., 0.));   
-        assert_eq!(6., round_up_nearest_n(4., 3.));   
-        assert_eq!(0., round_up_nearest_n(-2., 7.));   
-        assert_eq!(0., round_up_nearest_n(0., 0.));   
-    }
 }

@@ -5,7 +5,7 @@ pub const WORLD_BOUND_X: f64 = 180.0;
 pub const WORLD_BOUND_Y: f64 = 90.0;
 pub const WORLD_MAX_BOUND: f64 = 180.0; 
 
-pub const MAX_TILE_LAYER: usize = 16;
+pub const MAX_TILE_LAYER: usize = 19;
 
 /// returns `(tile layer, tile size)`
 pub fn get_tile_layer_and_size(view: &Rect) -> (usize, f64) {

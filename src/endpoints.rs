@@ -99,11 +99,20 @@ pub fn get_endpoints_router(db: &NearsayDB, key: &Hmac<Sha256>) -> axum::Router 
                 }
             }
         ))
-        .route("/users/{username}", get(
+        .route("/users/{query_type}/{query}", get(
             clone_into_closure! {
                 (db)
-                |Path(username): Path<String>| async move {
-                    match db.get_user_from_username(&username).await { 
+                |Path(query_type): Path<String>, Path(query): Path<String>| async move {
+                    
+                    let res = 
+                        if query_type == "id" {
+                            db.get::<User>("users", &query).await
+                        }
+                        else {
+                            db.get_user_from_username(&query).await
+                        };
+                    
+                    match res { 
                         Err(_) => empty_response(500),
                         Ok(None) => empty_response(404),
                         Ok(Some(user)) => {

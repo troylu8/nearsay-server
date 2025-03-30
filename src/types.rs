@@ -40,8 +40,6 @@ pub fn get_blurb_from_body(post_body: &str) -> String {
 #[derive(Serialize, Deserialize, Debug)]
 pub struct User {
     pub _id: String,
-    pub pos: Option<[f64; 2]>,
-
     pub username: String,
     pub avatar: usize,
     pub hash: String,

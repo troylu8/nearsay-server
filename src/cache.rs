@@ -356,7 +356,13 @@ impl MapCache {
         
         let uid = match uid {
             Some(uid) => uid.to_string(),
-            None => self.users_cache.get(format!("socket:{socket_id}")).await?,
+            None => {
+                let uid: Option<String> = self.users_cache.get(format!("socket:{socket_id}")).await?;
+                match uid {
+                    None => return Ok(()),
+                    Some(uid) => uid,
+                }
+            },
         };
         
         p.zrem("users", &uid).ignore(); // delete user from geomap
