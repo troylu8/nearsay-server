@@ -23,15 +23,14 @@ impl POI for Post {
         doc! {
             "$project": {
                 "pos": 1,
-                "blurb": { "$substrCP": [ "$body", 0, 10 ]},
+                "blurb": { "$substrCP": [ "$body", 0, BLURB_LENGTH as i32 ]},
             }
         }
     }
 }
 
+const BLURB_LENGTH: usize = 25;
 pub fn get_blurb_from_body(post_body: &str) -> String {
-    const BLURB_LENGTH: usize = 10;
-    
     if post_body.len() <= BLURB_LENGTH { post_body.to_string() } 
     else { format!("{}...", post_body[..BLURB_LENGTH].to_string()) }
 }

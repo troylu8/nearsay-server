@@ -1,7 +1,7 @@
 
-use axum::{body::Body, extract::Path, http::{HeaderMap, StatusCode}, response::{IntoResponse, Response}, routing::{get, post}, Json};
+use axum::{body::Body, extract::Path, http::{HeaderMap, StatusCode}, response::Response, routing::{get, post}};
 use hmac::Hmac;
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use serde_json::{json, Value};
 use sha2::Sha256;
 use nearsay_server::{clone_into_closure, NearsayError};
@@ -66,19 +66,20 @@ pub fn get_endpoints_router(db: &NearsayDB, key: &Hmac<Sha256>) -> axum::Router 
                         Ok(None) => empty_response(404),
                         Ok(Some(post)) => {
                             
-                            let author_name = match &post.authorId {
+                            let author_info = match &post.authorId {
                                 None => None,
                                 Some(author_id) => 
                                     match db.get::<User>("users", &author_id).await {
-                                        Ok(Some(user)) => Some(user.username),
+                                        Ok(Some(user)) => Some((user.avatar, user.username)),
                                         _ => None
                                     }
                             };
 
                             let mut post = json!(post);
                             
-                            if let Some(author_name) = author_name {
-                                post.as_object_mut().unwrap().insert("authorName".to_string(), Value::String(author_name));
+                            if let Some((avatar, username)) = author_info {
+                                post.as_object_mut().unwrap().insert("authorAvatar".to_string(), Value::Number(avatar.into()));
+                                post.as_object_mut().unwrap().insert("authorName".to_string(), Value::String(username));
                             }
                             post.as_object_mut().unwrap().remove("authorId");
 

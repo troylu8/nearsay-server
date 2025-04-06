@@ -1,4 +1,4 @@
-use mongodb::bson::{doc, Bson, Document};
+use mongodb::bson::{doc, Document};
 use serde::{Serialize, Deserialize};
 
 pub const WORLD_BOUND_X: f64 = 180.0;

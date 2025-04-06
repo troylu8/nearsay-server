@@ -351,19 +351,13 @@ impl MapCache {
         Ok(())
     }
     
-    pub async fn del_user(&mut self, uid: Option<&str>, socket_id: &str) -> RedisResult<()> {
+    pub async fn get_uid_from_socket(&mut self, socket_id: &str) -> RedisResult<Option<String>> {
+        let uid: Option<String> = self.users_cache.get(format!("socket:{socket_id}")).await?;
+        Ok(uid)
+    }
+    
+    pub async fn del_user(&mut self, uid: &str, socket_id: &str) -> RedisResult<()> {
         let mut p = &mut redis::pipe();
-        
-        let uid = match uid {
-            Some(uid) => uid.to_string(),
-            None => {
-                let uid: Option<String> = self.users_cache.get(format!("socket:{socket_id}")).await?;
-                match uid {
-                    None => return Ok(()),
-                    Some(uid) => uid,
-                }
-            },
-        };
         
         p.zrem("users", &uid).ignore(); // delete user from geomap
         p = del_avatar(p, &uid);
@@ -373,6 +367,13 @@ impl MapCache {
         let _: () = p.query_async(&mut self.users_cache).await?;
         
         Ok(())
+    }
+    
+    pub async fn del_user_from_socket(&mut self, socket_id: &str) -> RedisResult<()> {
+        match self.get_uid_from_socket(socket_id).await? {
+            Some(uid) => self.del_user(&uid, socket_id).await,
+            None => Ok(())
+        }
     }
     
     pub async fn geoquery_users(&mut self, within: &Rect) -> Result<Vec<UserPOI>, Box<dyn Error>> {

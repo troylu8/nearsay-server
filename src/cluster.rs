@@ -63,6 +63,11 @@ impl Cluster {
             other.size()
         );
         
+        // self.id is set to be the smaller of self.id and other.id, to keep consistent cluster ids
+        if other.id < self.id {
+            self.id = other.id.clone();
+        }
+        
         self.pos = (merged_x, merged_y);
         self.size = Some(merged_size);
         self.blurb = None;

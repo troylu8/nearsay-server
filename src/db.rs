@@ -131,8 +131,16 @@ impl NearsayDB {
     }
     
     pub async fn delete_user_from_cache(&mut self, uid: Option<&str>, socket_id: &str) -> Result<(), ()> {
-        self.cache.del_user(uid, socket_id).await
+        match uid {
+            Some(uid) => self.cache.del_user(uid, socket_id).await,
+            None => self.cache.del_user_from_socket(socket_id).await,
+        }
         .map_err(|e| eprintln!("when deleting user from cache: {e}"))
+    }
+    
+    pub async fn get_uid_from_socket(&mut self, socket_id: &str) -> Result<Option<String>, ()> {
+        self.cache.get_uid_from_socket(socket_id).await
+        .map_err(|e| eprintln!("when getting uid from socket: {e}"))
     }
 
     pub async fn insert_user(&mut self, uid: &str, username: &str, password: &str, avatar: usize) -> Result<(), NearsayError> {

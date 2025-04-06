@@ -105,12 +105,11 @@ pub fn on_socket_connect(client_socket: SocketRef, db: &NearsayDB, key: &Hmac<Sh
         let Ok(jwt) = create_jwt(&key, uid.clone()) else { return ack.send(&500).unwrap(); };
         
         if db.add_user_to_cache(&uid, client_socket.id.as_str(), &pos, avatar, None).await.is_ok() {
-            broadcast_at(&client_socket, pos, "user-update", false, 
+            broadcast_at(&client_socket, pos, "user-enter", false, 
                 &json! ({
-                    "uid": uid,
+                    "id": uid,
                     "pos": pos,
                     "avatar": avatar,
-                    "username": null
                 })
             );
             ack.send(&jwt).unwrap();
@@ -165,10 +164,10 @@ pub fn on_socket_connect(client_socket: SocketRef, db: &NearsayDB, key: &Hmac<Sh
     async fn enter_world(db: &mut NearsayDB, client_socket: SocketRef, uid: &str, pos: [f64; 2], avatar: usize, username: Option<&str>) -> Result<(), ()> {
         
         db.add_user_to_cache(uid, client_socket.id.as_str(), &pos, avatar, username).await?;
-
+        
         broadcast_at(&client_socket, pos, "user-enter", false,
             &json! ({
-                "uid": uid,
+                "id": uid,
                 "pos": pos,
                 "avatar": avatar,
                 "username": username
@@ -206,7 +205,6 @@ pub fn on_socket_connect(client_socket: SocketRef, db: &NearsayDB, key: &Hmac<Sh
         clone_into_closure_mut! {
             (db, key)
             |client_socket: SocketRef, Data(SignInData{username, password, pos, guest_jwt}), ack: AckSender| async move {
-                
                 // check if user exists
                 let user = match db.get_user_from_username(&username).await {
                     Err(_) => return ack.send(&500).unwrap(),
@@ -256,14 +254,19 @@ pub fn on_socket_connect(client_socket: SocketRef, db: &NearsayDB, key: &Hmac<Sh
                 match db.set_user_pos(&uid, &pos).await {
                     Err(()) => ack.send(&500).unwrap(),
                     Ok(_) => {
-                        broadcast_at(&client_socket, pos, "user-enter", false, 
-                            &json!({
-                                "uid": uid,
-                                "pos": &pos as &[f64]
-                            })
-                        );
-                        
-                        ack.send(&()).unwrap()
+                        match db.get_pos_and_avatar(&uid).await {
+                            Ok(Some((_, avatar))) => {
+                                broadcast_at(&client_socket, pos, "user-enter", false, 
+                                    &json!({
+                                        "id": uid,
+                                        "pos": &pos as &[f64],
+                                        "avatar": avatar
+                                    })
+                                );
+                                ack.send(&()).unwrap()
+                            }
+                            _ => ack.send(&500).unwrap()
+                        }
                     },
                 }
             }
@@ -275,7 +278,6 @@ pub fn on_socket_connect(client_socket: SocketRef, db: &NearsayDB, key: &Hmac<Sh
         clone_into_closure_mut! {
             (db, key)
             |client_socket: SocketRef, Data(ExitWorldData{jwt, stay_online, delete_account}), ack: AckSender| async move {
-
                 // get uid from jwt
                 let Ok(JWTPayload { uid }) = authenticate_jwt(&key, &jwt)
                 else { return ack.send(&500).unwrap() };
@@ -294,13 +296,12 @@ pub fn on_socket_connect(client_socket: SocketRef, db: &NearsayDB, key: &Hmac<Sh
                     return ack.send(&500).unwrap();
                 }
                 
+                broadcast_at(&client_socket, [x, y], "user-leave", false, &uid );
+                
                 // create a guest poi if stay_online == true
                 match stay_online {
                     Some(true) => create_guest(&mut db, &key, client_socket, [x, y], avatar, ack).await,
-                    _ => {
-                        broadcast_at(&client_socket, [x, y], "user-leave", false, &uid );
-                        ack.send(&()).unwrap()
-                    }
+                    _ => ack.send(&()).unwrap()
                 }
             }
         }
@@ -311,6 +312,7 @@ pub fn on_socket_connect(client_socket: SocketRef, db: &NearsayDB, key: &Hmac<Sh
         clone_into_closure_mut! {
             (db)
             |client_socket: SocketRef, Data(ViewShiftData { uid, zoom, tile_layer, view}), ack: AckSender| async move {
+                
                 client_socket.leave_all().unwrap();
                 
                 if zoom < MIN_ZOOM_LEVEL || MAX_ZOOM_LEVEL < zoom { 
@@ -341,7 +343,7 @@ pub fn on_socket_connect(client_socket: SocketRef, db: &NearsayDB, key: &Hmac<Sh
                         resp.users.swap_remove(i);
                     }
                 }
-    
+                
                 ack.send( &json!(resp) ).unwrap();
             }
         }
@@ -411,14 +413,8 @@ pub fn on_socket_connect(client_socket: SocketRef, db: &NearsayDB, key: &Hmac<Sh
                         }
                     }
                 };
-                println!("about to broadcast post", );
                 if let Ok((post_id, blurb)) = db.insert_post(author_id, &pos, &body).await {
                     
-                    println!("broadcasting {:#?}", & json! ({
-                        "id": post_id,
-                        "pos": &pos as &[f64],
-                        "blurb": blurb,
-                    }));
                     broadcast_at(&client_socket, pos, "new-post", true,
                         & json! ({
                             "id": post_id,
@@ -454,7 +450,14 @@ pub fn on_socket_connect(client_socket: SocketRef, db: &NearsayDB, key: &Hmac<Sh
     client_socket.on_disconnect(clone_into_closure_mut!(
         (db)
         |client_socket: SocketRef| async move {
-            db.delete_user_from_cache(None, client_socket.id.as_str()).await.unwrap();
+            let socket_id = client_socket.id.as_str();
+            
+            if let Ok(Some(uid)) = db.get_uid_from_socket(socket_id).await {
+                if let Ok(Some(((x, y), _))) = db.get_pos_and_avatar(&uid).await {
+                    db.delete_user_from_cache(Some(&uid), socket_id).await.unwrap();
+                    broadcast_at(&client_socket, [x, y], "user-leave", false, &uid );
+                }
+            }
         }
     ));
 }
@@ -479,7 +482,7 @@ fn broadcast_at_multiple<T: Sized + Serialize>(io: &SocketRef, pts: &[[f64; 2]],
         };
         
         targets = io.within(room_name(0, area.left, area.bottom));
-        println!("broadcasting {} to {}", event, room_name(0, area.left, area.bottom));
+        // println!("broadcasting {} to {}", event, room_name(0, area.left, area.bottom));
         
         for tile_layer in 1..=MAX_TILE_LAYER {
             
@@ -493,7 +496,7 @@ fn broadcast_at_multiple<T: Sized + Serialize>(io: &SocketRef, pts: &[[f64; 2]],
             else { area.top = mid_y; }
             
             targets = targets.within(room_name(tile_layer, area.left, area.bottom));
-            println!("broadcasting {} to {}", event, room_name(tile_layer, area.left, area.bottom));
+            // println!("broadcasting {} to {}", event, room_name(tile_layer, area.left, area.bottom));
         }
     }
     
@@ -510,7 +513,7 @@ pub fn join_rooms(client_socket: &SocketRef, tile_layer: usize, aligned_rect: &R
     let width = ((aligned_rect.right - aligned_rect.left) / tile_size).round() as usize;
     let height = ((aligned_rect.top - aligned_rect.bottom) / tile_size).round() as usize;
     
-    println!("\nnew rooms\n", );
+    // println!("\nnew rooms\n", );
     
     for x in 0..width {
         for y in 0..height {
@@ -521,7 +524,7 @@ pub fn join_rooms(client_socket: &SocketRef, tile_layer: usize, aligned_rect: &R
                 aligned_rect.bottom + (y as f64 * tile_size)
             );
             
-            println!("joined {}", room);
+            // println!("joined {}", room);
             client_socket.join(room).unwrap();
         }
     }
