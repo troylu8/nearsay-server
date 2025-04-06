@@ -318,17 +318,17 @@ impl MapCache {
         Ok(old_pos)
     }
     
-    pub async fn edit_user_if_exists(&mut self, uid: &str, avatar: Option<usize>, username: Option<&str>) -> RedisResult<()> {
+    pub async fn edit_user_if_exists(&mut self, uid: &str, avatar: &Option<usize>, username: &Option<String>) -> RedisResult<()> {
         if avatar.is_none() && username.is_none()   { return Ok(()) }
         if !self.user_exists(uid).await?            { return Ok(()) }
         
         let mut p = &mut redis::pipe();
         
         if let Some(avatar) = avatar {
-            p = set_avatar(p, uid, avatar);
+            p = set_avatar(p, uid, *avatar);
         }
         if let Some(username) = username {
-            p = set_username(p, uid, username);
+            p = set_username(p, uid, &username);
         }
         
         let _:() = p.query_async(&mut self.users_cache).await?;

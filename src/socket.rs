@@ -86,9 +86,8 @@ struct ExitWorldData {
 #[derive(Deserialize, Debug)]
 struct EditUserData {
     jwt: String,
-    avatar: Option<i32>,      // mongodb doesn't take usize
+    avatar: Option<usize>,
     username: Option<String>, 
-    // bio??
 }
 
 #[derive(Deserialize, Debug)]
@@ -371,25 +370,19 @@ pub fn on_socket_connect(client_socket: SocketRef, db: &NearsayDB, key: &Hmac<Sh
         clone_into_closure_mut! {
             (db, key)
             |client_socket: SocketRef, Data( EditUserData{ jwt, avatar, username }), ack: AckSender| async move {
+                println!("got edit-user {} {:?} {:?}", jwt, avatar, username);
                 let Ok(JWTPayload {uid, ..}) = authenticate_jwt(&key, &jwt) else { return };
                 
-                if db.get::<User>("users", &uid).await.is_ok_and(|x| x.is_none()) {
-                    return ack.send(&404).unwrap();
-                }
-                
-                let mut update = doc! {
-                    "avatar": avatar,
-                    "username": username,
-                };
-                
-                if let Err(nearsay_err) = db.edit_user(&uid, &update).await {
+                if let Err(nearsay_err) = db.edit_user(&uid, &avatar, &username).await {
                     return ack.send(&nearsay_err.to_status_code()).unwrap();
                 }
                 
-                
                 if let Ok(Some((pos, _))) = db.get_pos_and_avatar(&uid).await {
-                    update.insert("uid", uid);
-                    broadcast_at(&client_socket, pos.into(), "user-edited", false, &update);
+                    broadcast_at(&client_socket, pos.into(), "user-edit", false, &json! ({
+                        "id": uid,
+                        "avatar": avatar,
+                        "username": username,
+                    }));
                 }
 
                 ack.send(&()).unwrap()
@@ -435,7 +428,7 @@ pub fn on_socket_connect(client_socket: SocketRef, db: &NearsayDB, key: &Hmac<Sh
                 let Ok( JWTPayload{ uid } ) = authenticate_jwt(&key, &jwt)
                 else { return };
 
-                broadcast_at(&client_socket, pos, "chat", true,
+                broadcast_at(&client_socket, pos, "chat", false,
                     &json!({
                         "uid": uid,
                         "msg": msg

@@ -180,7 +180,7 @@ impl NearsayDB {
                 NearsayError::ServerError
             })?;
             
-        self.cache.edit_user_if_exists(uid, Some(avatar), Some(username)).await.map_err(|e| {
+        self.cache.edit_user_if_exists(uid, &Some(avatar), &Some(username.to_string())).await.map_err(|e| {
             eprintln!("when updating cache while adding new user: {e}");
             NearsayError::ServerError
         })
@@ -191,12 +191,15 @@ impl NearsayDB {
         self.cache.set_user_pos(uid, pos[0], pos[1]).await.map_err(|e| eprintln!("when moving user: {e}"))
     }
 
-    pub async fn edit_user(&mut self, uid: &str, update: &Document) -> Result<(), NearsayError> {
+    pub async fn edit_user(&mut self, uid: &str, avatar: &Option<usize>, username: &Option<String>) -> Result<(), NearsayError> {
         
         self.mongo_db.collection::<User>("users")
             .update_one(
                 doc! { "_id": uid },
-                doc! { "$set": update }
+                doc! { "$set": {
+                    "avatar": avatar.map(|a| a as i32),
+                    "username": username,
+                }}
             )
             .await
             .map_err(|e| match *e.kind {
@@ -207,11 +210,7 @@ impl NearsayDB {
                 }
             })?;
         
-        self.cache.edit_user_if_exists(
-            uid,
-            update.get("avatar").map(|a| a.as_i32().unwrap() as usize),
-            update.get("username").map(|u| u.as_str().unwrap()),
-        ).await.map_err(|_| NearsayError::ServerError)?;
+        self.cache.edit_user_if_exists(uid, avatar, username).await.map_err(|_| NearsayError::ServerError)?;
         
         Ok(())
     }
