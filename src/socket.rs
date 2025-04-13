@@ -78,6 +78,12 @@ struct SignInData {
 }
 
 #[derive(Deserialize, Debug)]
+struct SignInFromJWTData {
+    jwt: String,
+    pos: Option<[f64; 2]>,
+}
+
+#[derive(Deserialize, Debug)]
 struct EnterWorldData {
     jwt: String,
     pos: [f64; 2]
@@ -199,7 +205,7 @@ pub fn on_socket_connect(client_socket: SocketRef, db: &NearsayDB, key: &Hmac<Sh
                 }
                 
                 if let Some(pos) = pos {
-                    let _ = enter_world(&mut db, client_socket, &uid, pos, avatar, Some(&username)).await;
+                    enter_world(&mut db, client_socket, &uid, pos, avatar, Some(&username)).await.unwrap();
                 }
 
                 ack.send(&jwt).unwrap()
@@ -207,13 +213,12 @@ pub fn on_socket_connect(client_socket: SocketRef, db: &NearsayDB, key: &Hmac<Sh
         }
     );
     
-    // for getting the jwt from username and password
+    // for getting the jwt from username and password, and optionally entering world
     client_socket.on(
         "sign-in",
         clone_into_closure_mut! {
             (db, key)
             |client_socket: SocketRef, Data(SignInData{username, password, pos, guest_jwt}), ack: AckSender| async move {
-                println!("got sign-in {}", username);
                 
                 // check if user exists
                 let user = match db.get_user_from_username(&username).await {
@@ -252,6 +257,26 @@ pub fn on_socket_connect(client_socket: SocketRef, db: &NearsayDB, key: &Hmac<Sh
             }
         }
     );
+    
+    client_socket.on(
+        "sign-in-from-jwt",
+        clone_into_closure_mut! {
+            (db, key)
+            |client_socket: SocketRef, Data(SignInFromJWTData{jwt, pos}), ack: AckSender| async move {
+                
+                let Ok(JWTPayload { uid, .. }) = authenticate_jwt(&key, &jwt) else { return ack.send(&500).unwrap() };
+                
+                let Ok(Some(user)) = db.get::<User>("users", &uid).await else { return ack.send(&500).unwrap() };
+                
+                if let Some(pos) = pos {
+                    enter_world(&mut db, client_socket, &user._id, pos, user.avatar, Some(&user.username)).await.unwrap();
+                }
+                
+                ack.send( &json!({ "avatar": user.avatar, "username": user.username })).unwrap();
+                
+            }
+        }
+    );
 
     client_socket.on(
         "enter-world",
@@ -265,6 +290,7 @@ pub fn on_socket_connect(client_socket: SocketRef, db: &NearsayDB, key: &Hmac<Sh
                     Err(()) => ack.send(&500).unwrap(),
                     Ok(_) => {
                         match db.get_pos_and_avatar(&uid).await {
+                            // pos and avatar exists in cache,
                             Ok(Some((_, avatar))) => {
                                 broadcast_at(&client_socket, pos, "user-enter", false, 
                                     &json!({
@@ -275,7 +301,10 @@ pub fn on_socket_connect(client_socket: SocketRef, db: &NearsayDB, key: &Hmac<Sh
                                 );
                                 ack.send(&()).unwrap()
                             }
-                            _ => ack.send(&500).unwrap()
+                            Ok(None) => {
+                                
+                            }
+                            Err(_) => ack.send(&500).unwrap()
                         }
                     },
                 }

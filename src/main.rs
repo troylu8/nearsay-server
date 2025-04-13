@@ -53,19 +53,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 //     let mut nearsay_db = NearsayDB::new().await;
     
-//     nearsay_db.add_user_to_cache("new", &[100.0, 1.0], 1, None).await?;
+//     _ = nearsay_db.insert_post(None, &[20.0, 20.0], "post body").await?;
+//     _ = nearsay_db.insert_post(None, &[20.0, 20.0], "post body").await?;
     
-//     // let w = Location::new(0, 135).haversine_distance_to(&Location::new(0, 100)).meters();
-//     // let h = Location::new(22.5, 0.0).haversine_distance_to(&Location::new(0, 0)).meters();
-//     // println!("w {}", w);
-//     // println!("h {}", h);
+//     let (post_id, _) = nearsay_db.insert_post(None, &[20.0, 20.0], "post body").await.unwrap();
     
-//     // println!("d {}", (w * w + h * h).sqrt() );
-//     // let d = Location::new(22.5, 135.0).haversine_distance_to(&Location::new(0, 100)).meters();
-//     // println!("d true {}", d );
-    
-//     let r = nearsay_db.geoquery_users(&Rect { top: 15.0, bottom: -20.0, left: 90.0, right: 180.0 }).await;
-//     // println!("{r:?}");
+//     _ = nearsay_db.delete_post(&post_id).await;
     
 //     Ok(())
 // }

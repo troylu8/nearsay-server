@@ -17,22 +17,26 @@ const MAX_CACHED_ZOOM_LEVEL: usize = 5;
 const CACHED_ZOOM_LEVELS: usize = MAX_CACHED_ZOOM_LEVEL - MIN_CACHED_ZOOM_LEVEL + 1;
 
 /// `radius` in meters
-fn geoquery_radius<'a>(pipeline: &'a mut Pipeline, zoom: usize, x: f64, y: f64, radius: f64) -> &'a mut Pipeline {
-    pipeline.cmd("GEOSEARCH")
-            .arg(format!("Z{zoom}"))
-            .arg("FROMLONLAT")
-            .arg(x)
-            .arg(y)
-            .arg("BYRADIUS")
-            .arg(radius)
-            .arg(Unit::Meters)
-            .arg("WITHCOORD")
+fn geoquery_radius<'a>(pipeline: &'a mut Pipeline, zoom: usize, x: f64, y: f64, radius: f64, with_coord: bool) -> &'a mut Pipeline {
+    let query = pipeline.cmd("GEOSEARCH")
+                .arg(format!("Z{zoom}"))
+                .arg("FROMLONLAT")
+                .arg(x)
+                .arg(y)
+                .arg("BYRADIUS")
+                .arg(radius)
+                .arg(Unit::Meters);
+            
+    match with_coord {
+        true => query.arg("WITHCOORD"),
+        false => query,
+    }
 }
 
-// let mut res = vec![];
-//     for search_res in search_results {
-//         res.push(self.search_res_to_cluster(zoom, search_res, true).await?);
-//     }
+fn get_cluster_pos<'a>(pipeline: &'a mut Pipeline, zoom: usize, cluster_ids: &[&str]) -> &'a mut Pipeline {
+    pipeline.geo_pos(format!("Z{zoom}"), cluster_ids)
+}
+
 fn get_cluster_size<'a>(pipeline: &'a mut Pipeline, zoom: usize, cluster_id: &str) -> &'a mut Pipeline {
     pipeline.get(format!("size:Z{zoom}:{cluster_id}"))
 }
@@ -159,8 +163,9 @@ impl MapCache {
         // get ids and positions of nearby clusters
         let mut pipe_geoquery = &mut redis::pipe();
         for zoom in MIN_CACHED_ZOOM_LEVEL..=MAX_CACHED_ZOOM_LEVEL {
-            pipe_geoquery = geoquery_radius(pipe_geoquery, zoom, x, y, get_cluster_radius_meters(zoom));
+            pipe_geoquery = geoquery_radius(pipe_geoquery, zoom, x, y, get_cluster_radius_meters(zoom), true);
         }
+        
         // nearby_clusters[x] = (id, pos) of each nearby cluster on zoom x
         let nearby_clusters: [ Vec<(String, (f64, f64))> ; CACHED_ZOOM_LEVELS] = pipe_geoquery.query_async(&mut self.posts_cache).await.unwrap();
         let mut nearby_clusters_ids = HashSet::new();
@@ -250,7 +255,47 @@ impl MapCache {
 
         Ok(())
     }
-
+    
+    pub async fn del_post(&mut self, post_id: &str, [x, y]: [f64; 2]) -> RedisResult<()> {
+        
+        let lock_manager = LockManager::new(vec!["redis://127.0.0.1:6000"]);
+        let lock = loop {
+            if let Ok(lock) = lock_manager
+                .lock("delete post".as_bytes(), Duration::from_millis(1000))
+                .await
+            {
+                break lock;
+            }
+        };
+        
+        let mut pipe_sizes = &mut redis::pipe();
+        
+        // get sizes of each cluster with this id
+        for zoom in MIN_CACHED_ZOOM_LEVEL..=MAX_CACHED_ZOOM_LEVEL {
+            pipe_sizes = get_cluster_size(pipe_sizes, zoom, post_id);
+        }
+        
+        let cluster_sizes: [Option<usize>; CACHED_ZOOM_LEVELS] = pipe_sizes.query_async(&mut self.posts_cache).await.unwrap();
+        
+        let mut pipe_del = &mut redis::pipe();
+        
+        // delete clusters with a size of 1
+        for (i, size) in cluster_sizes.iter().enumerate() {
+            if Some(1) == *size {
+                pipe_del = del_cluster(pipe_del, i + MIN_CACHED_ZOOM_LEVEL, post_id);
+            }
+        }
+        
+        // regardless of whether clusters were deleted on all zoom levels, delete the blurb
+        pipe_del = del_blurb(pipe_del, post_id);
+        
+        pipe_del.exec_async(&mut self.posts_cache).await.unwrap();
+        
+        lock_manager.unlock(&lock).await;
+        
+        Ok(())
+    }
+    
     /// returns `(cluster_id, cluster)`
     pub async fn geoquery_post_pts(&mut self, zoom: usize, within: &Rect) -> Result<Vec<Cluster>, ()> {
         if zoom < MIN_CACHED_ZOOM_LEVEL || MAX_CACHED_ZOOM_LEVEL < zoom { return Err(()) }
@@ -291,10 +336,6 @@ impl MapCache {
         }
         
         Ok(res)
-    }
-    
-    pub async fn del_post(&mut self, post_id: &str) -> RedisResult<()> {
-        self.posts_cache.del(format!("blurb:{post_id}")).await
     }
     
     pub async fn flush_all_posts(&mut self) -> RedisResult<()> {

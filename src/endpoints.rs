@@ -4,7 +4,7 @@ use hmac::Hmac;
 use serde::Serialize;
 use serde_json::{json, Value};
 use sha2::Sha256;
-use nearsay_server::{clone_into_closure, NearsayError};
+use nearsay_server::{clone_into_closure, clone_into_closure_mut, NearsayError};
 
 
 use crate::{auth::{authenticate_with_header, create_jwt, JWTPayload}, db::{gen_id, NearsayDB}, types::{Post, User, UserType, VoteKind}};
@@ -36,17 +36,13 @@ pub fn get_endpoints_router(db: &NearsayDB, key: &Hmac<Sha256>) -> axum::Router 
             clone_into_closure! {
                 (db, key)
                 |headers: HeaderMap, Path(post_id): Path<String>, vote_kind: String| async move {
-
-                    match authenticate_with_header(&key, &headers) {
-                        Err(_) | Ok(None) => StatusCode::UNAUTHORIZED,
-                        
-                        // user must exist
-                        Ok(Some(JWTPayload {uid, ..} )) => {
-                            match db.get::<User>("users", &uid).await {
-                                Err(()) => StatusCode::UNAUTHORIZED,
-                                Ok(_) => StatusCode::OK,
-                            }
-                        }
+                    
+                    let Ok(Some(JWTPayload {uid, ..})) = authenticate_with_header(&key, &headers)
+                    else { return StatusCode::UNAUTHORIZED };
+                    
+                    match db.insert_vote(&uid, &post_id, VoteKind::from_str(&vote_kind)).await {
+                        Ok(_) => StatusCode::OK,
+                        Err(_) => StatusCode::INTERNAL_SERVER_ERROR
                     }
                 }
             }
@@ -103,7 +99,7 @@ pub fn get_endpoints_router(db: &NearsayDB, key: &Hmac<Sha256>) -> axum::Router 
         .route("/users/{query_type}/{query}", get(
             clone_into_closure! {
                 (db)
-                |Path(query_type): Path<String>, Path(query): Path<String>| async move {
+                |Path((query_type, query)): Path<(String, String)>| async move {
                     
                     let res = 
                         if query_type == "id" {
@@ -112,9 +108,12 @@ pub fn get_endpoints_router(db: &NearsayDB, key: &Hmac<Sha256>) -> axum::Router 
                         else {
                             db.get_user_from_username(&query).await
                         };
-                    
+                        
                     match res { 
-                        Err(_) => empty_response(500),
+                        Err(e) => {
+                            eprintln!("in user endpoint: {e:?}");
+                            empty_response(500)
+                        },
                         Ok(None) => empty_response(404),
                         Ok(Some(user)) => {
                             let mut user = json!(user);
