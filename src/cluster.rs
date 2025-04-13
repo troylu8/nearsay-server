@@ -5,7 +5,7 @@ use serde::Serialize;
 use crate::db::gen_id;
 
 pub const MIN_ZOOM_LEVEL: usize = 3;
-pub const MAX_ZOOM_LEVEL: usize = 19;
+pub const MAX_ZOOM_LEVEL: usize = 18;
 
 pub fn get_cluster_radius_meters(zoom_level: usize) -> f64 {
     const FIFTY_PX_IN_METERS_AT_ZOOM_0: f64 = 7827151.696402048;

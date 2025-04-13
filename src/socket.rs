@@ -40,6 +40,13 @@ struct NewPostData {
     body: String
 }
 
+#[derive(Serialize, Deserialize, Debug)]
+struct DeletePostData {
+    jwt: String,
+    post_id: String
+}
+
+
 #[derive(Deserialize, Debug)]
 struct NewGuestData {
     pos: [f64; 2],
@@ -146,7 +153,7 @@ pub fn on_socket_connect(client_socket: SocketRef, db: &NearsayDB, key: &Hmac<Sh
                     Ok(_) => {
                         broadcast_at(&client_socket, [x, y], "user-update", false, 
                             &json!({
-                                "uid": uid,
+                                "id": uid,
                                 "username": username,
                                 "avatar": avatar
                             })
@@ -182,6 +189,8 @@ pub fn on_socket_connect(client_socket: SocketRef, db: &NearsayDB, key: &Hmac<Sh
             (db, key)
             |client_socket: SocketRef, Data(SignUpData{ username, password, avatar, pos }), ack: AckSender| async move {
                 
+                if username.len() > 50 { return ack.send(&406).unwrap() }
+                
                 let uid = gen_id();
                 let Ok(jwt) = create_jwt(&key, uid.clone()) else { return ack.send(&500).unwrap() };
                 
@@ -204,6 +213,8 @@ pub fn on_socket_connect(client_socket: SocketRef, db: &NearsayDB, key: &Hmac<Sh
         clone_into_closure_mut! {
             (db, key)
             |client_socket: SocketRef, Data(SignInData{username, password, pos, guest_jwt}), ack: AckSender| async move {
+                println!("got sign-in {}", username);
+                
                 // check if user exists
                 let user = match db.get_user_from_username(&username).await {
                     Err(_) => return ack.send(&500).unwrap(),
@@ -326,12 +337,14 @@ pub fn on_socket_connect(client_socket: SocketRef, db: &NearsayDB, key: &Hmac<Sh
                         
                         join_rooms(&client_socket, tile_layer, &aligned_rect);
                         
-                        if let Ok(post_pts) = db.geoquery_post_pts(zoom, &aligned_rect).await {
-                            resp.posts.extend(post_pts);
+                        match db.geoquery_post_pts(zoom, &aligned_rect).await {
+                            Ok(post_pts) => resp.posts.extend(post_pts),
+                            Err(_) => { return ack.send(&500).unwrap() },
                         }
                         
-                        if let Ok(user_pts) = db.geoquery_users(&aligned_rect).await {
-                            resp.users.extend(user_pts);
+                        match db.geoquery_users(&aligned_rect).await {
+                            Ok(user_pts) => resp.users.extend(user_pts),
+                            Err(_) => { return ack.send(&500).unwrap() },
                         }
                     }
                 }
@@ -357,7 +370,7 @@ pub fn on_socket_connect(client_socket: SocketRef, db: &NearsayDB, key: &Hmac<Sh
                 
                 if let Ok(Some(old_pos)) = db.set_user_pos(&uid, &pos).await {
                     broadcast_at_multiple(&client_socket, &[old_pos.into(), pos], "user-update", false, &json!({
-                        "uid": uid,
+                        "id": uid,
                         "pos": &pos as &[f64]
                     }));
                 }
@@ -378,7 +391,7 @@ pub fn on_socket_connect(client_socket: SocketRef, db: &NearsayDB, key: &Hmac<Sh
                 }
                 
                 if let Ok(Some((pos, _))) = db.get_pos_and_avatar(&uid).await {
-                    broadcast_at(&client_socket, pos.into(), "user-edit", false, &json! ({
+                    broadcast_at(&client_socket, pos.into(), "user-update", false, &json! ({
                         "id": uid,
                         "avatar": avatar,
                         "username": username,
@@ -419,6 +432,33 @@ pub fn on_socket_connect(client_socket: SocketRef, db: &NearsayDB, key: &Hmac<Sh
             }
         }
     );
+    
+    client_socket.on(
+        "delete-post",
+        clone_into_closure_mut! {
+            (db, key)
+            |client_socket: SocketRef, Data(DeletePostData {jwt, post_id}), ack: AckSender| async move {
+                
+                let Ok(JWTPayload {uid, ..}) = authenticate_jwt(&key, &jwt) else { return ack.send(&401).unwrap(); };
+                
+                let Ok(Some(post)) = db.get::<Post>("posts", &post_id).await else { return ack.send(&404).unwrap(); };
+                
+                if post.authorId == Some(uid) {
+                    
+                    if db.delete_post(&post_id).await.is_err() {
+                        return ack.send(&500).unwrap();
+                    };
+                    
+                    broadcast_at(&client_socket, post.pos, "post-delete", false, &post_id);
+                    ack.send(&()).unwrap();
+                }
+                else {
+                    ack.send(&401).unwrap();
+                }
+                
+            }
+        }
+    );
 
     client_socket.on(
         "chat",
@@ -430,7 +470,7 @@ pub fn on_socket_connect(client_socket: SocketRef, db: &NearsayDB, key: &Hmac<Sh
 
                 broadcast_at(&client_socket, pos, "chat", false,
                     &json!({
-                        "uid": uid,
+                        "id": uid,
                         "msg": msg
                     })
                 );

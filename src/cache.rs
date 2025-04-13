@@ -56,7 +56,7 @@ fn get_blurb<'a>(pipeline: &'a mut Pipeline, cluster_id: &str) -> &'a mut Pipeli
     pipeline.get(format!("blurb:{cluster_id}"))
 }
 fn set_blurb<'a>(pipeline: &'a mut Pipeline, cluster_id: &str, blurb: &str) -> &'a mut Pipeline {
-    pipeline.set(format!("blurb:{cluster_id}"), format!(" '{blurb}' ")).ignore()
+    pipeline.set(format!("blurb:{cluster_id}"), blurb).ignore()
 }
 fn del_blurb<'a>(pipeline: &'a mut Pipeline, post_id: &str) -> &'a mut Pipeline {
     pipeline.del(format!("blurb:{post_id}")).ignore()
@@ -76,7 +76,7 @@ fn get_username<'a>(pipeline: &'a mut Pipeline, uid: &str) -> &'a mut Pipeline {
     pipeline.get(format!("username:{uid}"))
 }
 fn set_username<'a>(pipeline: &'a mut Pipeline, uid: &str, username: &str) -> &'a mut Pipeline {
-    pipeline.set(format!("username:{uid}"), format!(" '{username}' ")).ignore()
+    pipeline.set(format!("username:{uid}"), username).ignore()
 }
 fn del_username<'a>(pipeline: &'a mut Pipeline, uid: &str) -> &'a mut Pipeline {
     pipeline.del(format!("username:{uid}")).ignore()
@@ -89,6 +89,12 @@ fn del_socket<'a>(pipeline: &'a mut Pipeline, socket_id: &str) -> &'a mut Pipeli
     pipeline.del(format!("socket:{socket_id}")).ignore()
 }
 
+fn meters_between(lng1: f64, lat1: f64, lng2: f64, lat2: f64) -> f64 {
+    let loc1 = Location::new(lat1, lng1);
+    let loc2 = Location::new(lat2, lng2);
+    loc1.distance_to(&loc2).unwrap_or_else(|_| loc1.haversine_distance_to(&loc2) ).meters()
+}
+
 
 fn geosearch_cmd(key: &str, within: &Rect) -> Cmd {
     let mid_x = (within.left + within.right) / 2.0;
@@ -96,17 +102,17 @@ fn geosearch_cmd(key: &str, within: &Rect) -> Cmd {
     
     let width_meters =
         if within.bottom >= 0.0 { // north hemisphere
-            Location::new(within.bottom, within.left).haversine_distance_to(&Location::new(within.bottom, within.right)).meters() 
+            meters_between(within.left, within.bottom, within.right, within.bottom)
         }
         else if within.top <= 0.0 { // south hemisphere 
-            Location::new(within.top, within.left).haversine_distance_to(&Location::new(within.top, within.right)).meters()
+            meters_between(within.left, within.top, within.right, within.top)
         }
         else { // around equator
-            Location::new(0.0, within.left).haversine_distance_to(&Location::new(0.0, within.right)).meters()
+            meters_between(within.left, 0.0, within.right, 0.0)
         };
 
     // height = middle top -> middle bottom, in meters
-    let height_meters = Location::new(within.top, mid_x).haversine_distance_to(&Location::new(within.bottom, mid_x)).meters();
+    let height_meters = meters_between(mid_x, within.top, mid_x, within.bottom);
     
     redis::cmd("GEOSEARCH")
         .arg(key)
@@ -359,7 +365,7 @@ impl MapCache {
     pub async fn del_user(&mut self, uid: &str, socket_id: &str) -> RedisResult<()> {
         let mut p = &mut redis::pipe();
         
-        p.zrem("users", &uid).ignore(); // delete user from geomap
+        p = p.zrem("users", &uid).ignore(); // delete user from geomap
         p = del_avatar(p, &uid);
         p = del_username(p, &uid);
         p = del_socket(p, socket_id);

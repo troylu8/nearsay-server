@@ -6,7 +6,7 @@ use futures::{TryFutureExt, TryStreamExt};
 use mongodb::{ 
     bson::{bson, doc, Document}, error::{Error as MongoError, ErrorKind, WriteError, WriteFailure}, options::Hint, results::{DeleteResult, UpdateResult}, Client, Cursor, Database
 };
-use nearsay_server::NearsayError;
+use nearsay_server::{clone_into_closure_mut, NearsayError};
 use serde::{de::DeserializeOwned, Deserialize};
 use socketioxide::extract::SocketRef;
 use tokio_cron_scheduler::{Job, JobScheduler};
@@ -61,19 +61,21 @@ impl NearsayDB {
         }
     }
 
-    /// moves self into a closure, so requires ownership
-    async fn start_nightly_cleanup_job(self) {
+    async fn start_nightly_cleanup_job(&mut self) {
 
         let sched = JobScheduler::new().await.unwrap();
-
+        
+        self.run_nightly_cleanup().await.unwrap();
+        
+        let db_clone = self.clone();
         sched.add(
             // run every day at 04:00
             Job::new_async("0 0 4 * * *", 
                 move |_, _| {
-                    let mut nearsay_db = self.clone();
+                    let mut db_clone = db_clone.clone();
                     Box::pin(
                         async move {
-                            nearsay_db.run_nightly_cleanup().await.unwrap()
+                            db_clone.run_nightly_cleanup().await.unwrap()
                         } 
                     )
                 }
@@ -193,13 +195,18 @@ impl NearsayDB {
 
     pub async fn edit_user(&mut self, uid: &str, avatar: &Option<usize>, username: &Option<String>) -> Result<(), NearsayError> {
         
+        let mut update = doc! {};
+        if let Some(avatar) = avatar {
+            update.insert("avatar", *avatar as i32);
+        }
+        if let Some(username) = username {
+            update.insert("username", username);
+        }
+        
         self.mongo_db.collection::<User>("users")
             .update_one(
                 doc! { "_id": uid },
-                doc! { "$set": {
-                    "avatar": avatar.map(|a| a as i32),
-                    "username": username,
-                }}
+                doc! { "$set": update }
             )
             .await
             .map_err(|e| match *e.kind {
@@ -390,26 +397,28 @@ impl NearsayDB {
         }   
     }
 
-    pub async fn geoquery_post_pts(&mut self, zoom: usize, within: &Rect) -> Result<Vec<Cluster>, MongoError> {
+    pub async fn geoquery_post_pts(&mut self, zoom: usize, within: &Rect) -> Result<Vec<Cluster>, ()> {
         
         if let Ok(posts) = self.cache.geoquery_post_pts(zoom, within).await {
             return Ok(posts);
         }
 
-        let mut post_docs = self.geoquery::<Post>("posts", within).await?;
+        let mut post_docs = self.geoquery::<Post>("posts", within).await
+        .map_err(|e| eprintln!("when geoquery post pts{e}"))?;
+    
         let mut res: Vec<Cluster> = vec![];
         
-        while let Some(doc) = post_docs.try_next().await? {
+        while let Some(doc) = post_docs.try_next().await.map_err(|_| ())? {
             res.push(doc.into());
         }
 
         // don't cluster if zoomed all the way in
-        if zoom == MAX_ZOOM_LEVEL { Ok(res) }
+        if zoom >= MAX_ZOOM_LEVEL { Ok(res) }
         else { Ok(cluster(&res[..], get_cluster_radius_degrees(zoom)))  }
     }
 
-    pub async fn geoquery_users(&mut self, within: &Rect) -> Result<Vec<UserPOI>, Box<dyn std::error::Error>> {
-        self.cache.geoquery_users(within).await
+    pub async fn geoquery_users(&mut self, within: &Rect) -> Result<Vec<UserPOI>, ()> {
+        self.cache.geoquery_users(within).await.map_err(|e| eprintln!("when geoquery users: {e}"))
     }
 
     async fn geoquery<T>(&self, collection: &str, within: &Rect) -> Result<Cursor<Document>, MongoError>
