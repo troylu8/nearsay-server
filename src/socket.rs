@@ -111,30 +111,38 @@ struct ChatData {
 }
 
 pub fn on_socket_connect(client_socket: SocketRef, db: &NearsayDB, key: &Hmac<Sha256>) {
-    async fn create_guest(db: &mut NearsayDB, key: &Hmac<Sha256>, client_socket: SocketRef, pos: [f64; 2], avatar: usize, ack: AckSender) {
+    
+    /// returns `Ok(guest jwt)`
+    async fn enter_world_as_guest(db: &mut NearsayDB, key: &Hmac<Sha256>, client_socket: SocketRef, pos: [f64; 2], avatar: usize) -> Result<String, ()> {
         let uid = gen_id();
+        enter_world(db, client_socket, &uid, pos, avatar, None).await?;
+        create_jwt(&key, uid)
+    }
+    async fn enter_world(db: &mut NearsayDB, client_socket: SocketRef, uid: &str, pos: [f64; 2], avatar: usize, username: Option<&str>) -> Result<(), ()> {
         
-        let Ok(jwt) = create_jwt(&key, uid.clone()) else { return ack.send(&500).unwrap(); };
+        db.add_user_to_cache(uid, client_socket.id.as_str(), &pos, avatar, username).await?;
         
-        if db.add_user_to_cache(&uid, client_socket.id.as_str(), &pos, avatar, None).await.is_ok() {
-            broadcast_at(&client_socket, pos, "user-enter", false, 
-                &json! ({
-                    "id": uid,
-                    "pos": pos,
-                    "avatar": avatar,
-                })
-            );
-            ack.send(&jwt).unwrap();
-        }
-        else { ack.send(&500).unwrap(); };
+        broadcast_at(&client_socket, pos, "user-enter", false,
+            &json! ({
+                "id": uid,
+                "pos": pos,
+                "avatar": avatar,
+                "username": username
+            })
+        );
+        
+        Ok(())   
     }
 
     client_socket.on(
-        "sign-up-as-guest", 
+        "enter-world-as-guest", 
         clone_into_closure_mut! {
             (db, key)
             |client_socket: SocketRef, Data(NewGuestData { pos, avatar }), ack: AckSender| async move {
-                create_guest(&mut db, &key, client_socket, pos, avatar, ack).await;
+                match enter_world_as_guest(&mut db, &key, client_socket, pos, avatar).await {
+                    Ok(jwt) => ack.send(&jwt).unwrap(),
+                    Err(()) => ack.send(&500).unwrap(),
+                }
             }
         }
     );
@@ -173,22 +181,6 @@ pub fn on_socket_connect(client_socket: SocketRef, db: &NearsayDB, key: &Hmac<Sh
     );
     
     
-    async fn enter_world(db: &mut NearsayDB, client_socket: SocketRef, uid: &str, pos: [f64; 2], avatar: usize, username: Option<&str>) -> Result<(), ()> {
-        
-        db.add_user_to_cache(uid, client_socket.id.as_str(), &pos, avatar, username).await?;
-        
-        broadcast_at(&client_socket, pos, "user-enter", false,
-            &json! ({
-                "id": uid,
-                "pos": pos,
-                "avatar": avatar,
-                "username": username
-            })
-        );
-        
-        Ok(())   
-    }
-
     client_socket.on(
         "sign-up",
         clone_into_closure_mut! {
@@ -286,27 +278,13 @@ pub fn on_socket_connect(client_socket: SocketRef, db: &NearsayDB, key: &Hmac<Sh
                 let Ok(JWTPayload{uid}) = authenticate_jwt(&key, &jwt)
                 else { return ack.send(&401).unwrap() };
                 
-                match db.set_user_pos(&uid, &pos).await {
+                match db.get::<User>("users", &uid).await {
                     Err(()) => ack.send(&500).unwrap(),
-                    Ok(_) => {
-                        match db.get_pos_and_avatar(&uid).await {
-                            // pos and avatar exists in cache,
-                            Ok(Some((_, avatar))) => {
-                                broadcast_at(&client_socket, pos, "user-enter", false, 
-                                    &json!({
-                                        "id": uid,
-                                        "pos": &pos as &[f64],
-                                        "avatar": avatar
-                                    })
-                                );
-                                ack.send(&()).unwrap()
-                            }
-                            Ok(None) => {
-                                
-                            }
-                            Err(_) => ack.send(&500).unwrap()
-                        }
-                    },
+                    Ok(None) => ack.send(&404).unwrap(),
+                    Ok(Some(user)) => {
+                        enter_world(&mut db, client_socket, &uid, pos, user.avatar, Some(&user.username)).await.unwrap();
+                        ack.send(&()).unwrap();
+                    }
                 }
             }
         }
@@ -339,7 +317,10 @@ pub fn on_socket_connect(client_socket: SocketRef, db: &NearsayDB, key: &Hmac<Sh
                 
                 // create a guest poi if stay_online == true
                 match stay_online {
-                    Some(true) => create_guest(&mut db, &key, client_socket, [x, y], avatar, ack).await,
+                    Some(true) => match enter_world_as_guest(&mut db, &key, client_socket, [x, y], avatar).await {
+                        Ok(jwt) => ack.send(&jwt).unwrap(),
+                        Err(_) => ack.send(&500).unwrap(),
+                    }
                     _ => ack.send(&()).unwrap()
                 }
             }
@@ -412,7 +393,6 @@ pub fn on_socket_connect(client_socket: SocketRef, db: &NearsayDB, key: &Hmac<Sh
         clone_into_closure_mut! {
             (db, key)
             |client_socket: SocketRef, Data( EditUserData{ jwt, avatar, username }), ack: AckSender| async move {
-                println!("got edit-user {} {:?} {:?}", jwt, avatar, username);
                 let Ok(JWTPayload {uid, ..}) = authenticate_jwt(&key, &jwt) else { return };
                 
                 if let Err(nearsay_err) = db.edit_user(&uid, &avatar, &username).await {

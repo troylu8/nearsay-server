@@ -439,12 +439,16 @@ impl MapCache {
         
         // combine `search_results` and `avatars_and_names` into a `UserPOI` array
         for (i, (uid, pos)) in search_results.iter().enumerate() {
-            res.push(UserPOI {
-                id: uid.to_string(),
-                pos: *pos,
-                avatar: from_redis_value(&avatars_and_names[i * 2])?, 
-                username: from_redis_value(&avatars_and_names[i * 2 + 1])?, 
-            });
+            let avatar: Option<usize> = from_redis_value(&avatars_and_names[i * 2])?;
+            
+            if let Some(avatar) = avatar {
+                res.push(UserPOI {
+                    id: uid.to_string(),
+                    pos: *pos,
+                    avatar,
+                    username: from_redis_value(&avatars_and_names[i * 2 + 1])?, 
+                });
+            }
         }
         
         Ok(res)
