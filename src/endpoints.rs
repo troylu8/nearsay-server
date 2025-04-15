@@ -97,9 +97,23 @@ pub fn get_endpoints_router(db: &NearsayDB, key: &Hmac<Sha256>) -> axum::Router 
             }
         ))
         .route("/users/{query_type}/{query}", get(
-            clone_into_closure! {
+            clone_into_closure_mut! {
                 (db)
                 |Path((query_type, query)): Path<(String, String)>| async move {
+                    
+                    if query_type == "online" {
+                        let Ok(Some((_, avatar))) = db.get_cache_pos_and_avatar(&query).await 
+                        else { return empty_response(404) };
+                        
+                        let Ok(username) = db.get_cache_username(&query).await
+                        else { return empty_response(500) };
+                        
+                        return json_response(200, &json!({
+                            "id": query,
+                            "avatar": avatar,
+                            "username": username
+                        }));
+                    }
                     
                     let res = 
                         if query_type == "id" {
@@ -116,9 +130,11 @@ pub fn get_endpoints_router(db: &NearsayDB, key: &Hmac<Sha256>) -> axum::Router 
                         },
                         Ok(None) => empty_response(404),
                         Ok(Some(user)) => {
-                            let mut user = json!(user);
-                            user.as_object_mut().unwrap().remove("hash").unwrap();
-                            json_response(200, user)
+                            json_response(200, &json!({
+                                "id": user._id,
+                                "username": user.username,
+                                "avatar": user.avatar
+                            }))
                         },
                     }
                 }

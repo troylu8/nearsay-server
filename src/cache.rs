@@ -346,6 +346,10 @@ impl MapCache {
         self.users_cache.exists(format!("avatar:{uid}")).await
     }
     
+    pub async fn get_username(&mut self, uid: &str) -> RedisResult<Option<String>> {
+        self.users_cache.get(format!("username:{uid}")).await
+    }
+    
     pub async fn get_pos_and_avatar(&mut self, uid: &str) -> RedisResult<Option<((f64, f64), usize)>> {
         let mut p = &mut redis::pipe();
         
@@ -359,9 +363,15 @@ impl MapCache {
     }
     
     /// returns old position of user
-    pub async fn set_user_pos(&mut self, uid: &str, x: f64, y: f64) -> RedisResult<Option<(f64, f64)>> {
-        let old_pos = self.get_pos_and_avatar(uid).await?.map(|(old_pos, _)| old_pos);
-        let _: () = self.users_cache.geo_add("users", (Coord::lon_lat(x, y), uid)).await?;
+    pub async fn set_user_pos(&mut self, uid: &str, x: f64, y: f64) -> Result<(f64, f64), ()> {
+            
+        let old_pos = match self.get_pos_and_avatar(uid).await {
+            Err(_) | Ok(None) => return Err(()),    // user must already exist in cache
+            Ok(Some((old_pos, _))) => old_pos,
+        };
+        
+        let _: () = self.users_cache.geo_add("users", (Coord::lon_lat(x, y), uid)).await.map_err(|e| eprintln!("when setting pos: {e}"))?;
+        
         Ok(old_pos)
     }
     

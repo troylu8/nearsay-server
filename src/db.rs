@@ -7,11 +7,12 @@ use mongodb::{
     bson::{bson, doc, Document}, error::{Error as MongoError, ErrorKind, WriteError, WriteFailure}, options::Hint, results::{DeleteResult, UpdateResult}, Client, Cursor, Database
 };
 use nearsay_server::{clone_into_closure_mut, NearsayError};
+use redis::RedisResult;
 use serde::{de::DeserializeOwned, Deserialize};
 use socketioxide::extract::SocketRef;
 use tokio_cron_scheduler::{Job, JobScheduler};
 
-use crate::{area::Rect, cache::{MapCache, UserPOI}, cluster::{cluster, get_cluster_radius_degrees, Cluster, MAX_ZOOM_LEVEL}, types::{get_blurb_from_body, Guest, Post, User, UserType, Vote, VoteKind, POI}};
+use crate::{area::Rect, cache::{MapCache, UserPOI}, cluster::{cluster, get_cluster_radius_degrees, Cluster, MAX_ZOOM_LEVEL}, types::{get_blurb_from_body, Guest, Post, User, UserType, Vote, VoteKind, BLURB_LENGTH, POI}};
 
 
 
@@ -119,7 +120,10 @@ impl NearsayDB {
         }
     }
     
-    pub async fn get_pos_and_avatar(&mut self, uid: &str) -> Result<Option<((f64, f64), usize)>, ()> {
+    pub async fn get_cache_username(&mut self, uid: &str) -> Result<Option<String>, ()> {
+        self.cache.get_username(uid).await.map_err(|e| eprintln!("when getting cached username {e}"))
+    }
+    pub async fn get_cache_pos_and_avatar(&mut self, uid: &str) -> Result<Option<((f64, f64), usize)>, ()> {
         self.cache.get_pos_and_avatar(uid).await.map_err(|e| eprintln!("when getting guest: {e}"))
     }
     
@@ -185,8 +189,8 @@ impl NearsayDB {
     }
     
     /// returns old position of user
-    pub async fn set_user_pos(&mut self, uid: &str, pos: &[f64]) -> Result<Option<(f64, f64)>, ()> {
-        self.cache.set_user_pos(uid, pos[0], pos[1]).await.map_err(|e| eprintln!("when moving user: {e}"))
+    pub async fn set_user_pos(&mut self, uid: &str, pos: &[f64]) -> Result<(f64, f64), ()> {
+        self.cache.set_user_pos(uid, pos[0], pos[1]).await
     }
 
     pub async fn edit_user(&mut self, uid: &str, avatar: &Option<usize>, username: &Option<String>) -> Result<(), NearsayError> {
@@ -409,7 +413,7 @@ impl NearsayDB {
     
         let mut res: Vec<Cluster> = vec![];
         
-        while let Some(doc) = post_docs.try_next().await.map_err(|_| ())? {
+        while let Some(doc) = post_docs.try_next().await.map_err(|_| ())? {            
             res.push(doc.into());
         }
 

@@ -29,10 +29,10 @@ impl POI for Post {
     }
 }
 
-const BLURB_LENGTH: usize = 25;
+pub const BLURB_LENGTH: usize = 25;
 pub fn get_blurb_from_body(post_body: &str) -> String {
     if post_body.len() <= BLURB_LENGTH { post_body.to_string() } 
-    else { format!("{}...", post_body[..BLURB_LENGTH].to_string()) }
+    else { post_body[..BLURB_LENGTH].to_string() }
 }
 
 

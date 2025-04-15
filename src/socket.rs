@@ -156,7 +156,7 @@ pub fn on_socket_connect(client_socket: SocketRef, db: &NearsayDB, key: &Hmac<Sh
                 let Ok(JWTPayload{uid}) = authenticate_jwt(&key, &guest_jwt)
                 else { return ack.send(&401).unwrap() };
                 
-                let ((x, y), avatar) = match db.get_pos_and_avatar(&uid).await {
+                let ((x, y), avatar) = match db.get_cache_pos_and_avatar(&uid).await {
                     Err(_) => return ack.send(&500).unwrap(),
                     Ok(None) => return ack.send(&404).unwrap(),
                     Ok(Some(vals)) => vals,
@@ -229,7 +229,7 @@ pub fn on_socket_connect(client_socket: SocketRef, db: &NearsayDB, key: &Hmac<Sh
                 // if guest jwt was given, verify it before removing guest from cache
                 if let Some(guest_jwt) = guest_jwt {
                     if let Ok(JWTPayload { uid, .. }) = authenticate_jwt(&key, &guest_jwt) {
-                        if let Ok(Some((pos, _))) = db.get_pos_and_avatar(&uid).await {
+                        if let Ok(Some((pos, _))) = db.get_cache_pos_and_avatar(&uid).await {
                             db.delete_user_from_cache(Some(&uid), client_socket.id.as_str()).await.unwrap();
                             broadcast_at(&client_socket, pos.into(), "user-leave", false, &uid);
                         }
@@ -299,7 +299,7 @@ pub fn on_socket_connect(client_socket: SocketRef, db: &NearsayDB, key: &Hmac<Sh
                 let Ok(JWTPayload { uid }) = authenticate_jwt(&key, &jwt)
                 else { return ack.send(&500).unwrap() };
 
-                let ((x, y), avatar) = match db.get_pos_and_avatar(&uid).await {
+                let ((x, y), avatar) = match db.get_cache_pos_and_avatar(&uid).await {
                     Err(_) => return ack.send(&500).unwrap(),
                     Ok(None) => return ack.send(&404).unwrap(),
                     Ok(Some(vals)) => vals,
@@ -378,8 +378,8 @@ pub fn on_socket_connect(client_socket: SocketRef, db: &NearsayDB, key: &Hmac<Sh
             |client_socket: SocketRef, Data(MoveData {jwt, pos})| async move {
                 let Ok(JWTPayload {uid, ..}) = authenticate_jwt(&key, &jwt) else { return };
                 
-                if let Ok(Some(old_pos)) = db.set_user_pos(&uid, &pos).await {
-                    broadcast_at_multiple(&client_socket, &[old_pos.into(), pos], "user-update", false, &json!({
+                if let Ok(old_pos) = db.set_user_pos(&uid, &pos).await {
+                    broadcast_at_multiple(&client_socket, &[old_pos.into(), pos], "user-move", false, &json!({
                         "id": uid,
                         "pos": &pos as &[f64]
                     }));
@@ -399,7 +399,7 @@ pub fn on_socket_connect(client_socket: SocketRef, db: &NearsayDB, key: &Hmac<Sh
                     return ack.send(&nearsay_err.to_status_code()).unwrap();
                 }
                 
-                if let Ok(Some((pos, _))) = db.get_pos_and_avatar(&uid).await {
+                if let Ok(Some((pos, _))) = db.get_cache_pos_and_avatar(&uid).await {
                     broadcast_at(&client_socket, pos.into(), "user-update", false, &json! ({
                         "id": uid,
                         "avatar": avatar,
@@ -495,7 +495,7 @@ pub fn on_socket_connect(client_socket: SocketRef, db: &NearsayDB, key: &Hmac<Sh
             let socket_id = client_socket.id.as_str();
             
             if let Ok(Some(uid)) = db.get_uid_from_socket(socket_id).await {
-                if let Ok(Some(((x, y), _))) = db.get_pos_and_avatar(&uid).await {
+                if let Ok(Some(((x, y), _))) = db.get_cache_pos_and_avatar(&uid).await {
                     db.delete_user_from_cache(Some(&uid), socket_id).await.unwrap();
                     broadcast_at(&client_socket, [x, y], "user-leave", false, &uid );
                 }
