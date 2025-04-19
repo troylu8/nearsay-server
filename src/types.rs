@@ -57,15 +57,6 @@ impl POI for User {
     }
 }
 
-#[derive(Deserialize, Debug)]
-pub struct Guest {
-    pub pos: [f64; 2],
-    pub avatar: usize
-}
-
-pub enum UserType { User, Guest }
-
-
 
 #[derive(Debug, PartialEq, Clone)]
 pub struct Vote {

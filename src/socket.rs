@@ -1,15 +1,12 @@
-use std::{collections::HashMap, sync::Arc, time::Instant};
-
-use futures::{TryFutureExt, TryStreamExt};
 use hmac::Hmac;
-use mongodb::bson::{doc, Document};
+use mongodb::bson::doc;
 use serde::{Deserialize, Serialize};
 use nearsay_server::{clone_into_closure, clone_into_closure_mut};
 use serde_json::json;
 use sha2::Sha256;
-use socketioxide::{extract::{AckSender, Data, SocketRef}, operators::BroadcastOperators, socket::DisconnectReason};
+use socketioxide::extract::{AckSender, Data, SocketRef};
 
-use crate::{area::{get_tile_layer_and_size, Rect, MAX_TILE_LAYER, WORLD_MAX_BOUND}, auth::{authenticate_jwt, create_jwt, verify_password, JWTPayload}, cache::UserPOI, cluster::{Cluster, MAX_ZOOM_LEVEL, MIN_ZOOM_LEVEL}, db::{gen_id, NearsayDB}, types::{Post, User, POI}};
+use crate::{area::{Rect, MAX_TILE_LAYER, WORLD_MAX_BOUND}, auth::{authenticate_jwt, create_jwt, verify_password, JWTPayload}, cache::UserPOI, cluster::{Cluster, MAX_ZOOM_LEVEL, MIN_ZOOM_LEVEL}, db::{gen_id, NearsayDB}, types::{Post, User}};
 
 /// if a `uid` is given, exclude that user from returned users 
 #[derive(Deserialize, Debug)]
@@ -163,7 +160,10 @@ pub fn on_socket_connect(client_socket: SocketRef, db: &NearsayDB, key: &Hmac<Sh
                 };
                 
                 match db.insert_user(&uid, &username, &password, avatar).await {
-                    Err(nearsay_err) => ack.send(&nearsay_err.to_status_code()).unwrap(),
+                    Err(nearsay_err) => {
+                        eprintln!("{nearsay_err:?}");
+                        ack.send(&nearsay_err.to_status_code()).unwrap()
+                    },
                     Ok(_) => {
                         broadcast_at(&client_socket, [x, y], "user-update", false, 
                             &json!({
@@ -256,7 +256,7 @@ pub fn on_socket_connect(client_socket: SocketRef, db: &NearsayDB, key: &Hmac<Sh
             (db, key)
             |client_socket: SocketRef, Data(SignInFromJWTData{jwt, pos}), ack: AckSender| async move {
                 
-                let Ok(JWTPayload { uid, .. }) = authenticate_jwt(&key, &jwt) else { return ack.send(&500).unwrap() };
+                let Ok(JWTPayload { uid, .. }) = authenticate_jwt(&key, &jwt) else { return ack.send(&401).unwrap() };
                 
                 let Ok(Some(user)) = db.get::<User>("users", &uid).await else { return ack.send(&500).unwrap() };
                 
@@ -458,7 +458,7 @@ pub fn on_socket_connect(client_socket: SocketRef, db: &NearsayDB, key: &Hmac<Sh
                         return ack.send(&500).unwrap();
                     };
                     
-                    broadcast_at(&client_socket, post.pos, "post-delete", false, &post_id);
+                    broadcast_at(&client_socket, post.pos, "post-delete", true, &post_id);
                     ack.send(&()).unwrap();
                 }
                 else {
@@ -509,12 +509,15 @@ fn broadcast_at<T: Sized + Serialize>(io: &SocketRef, pos: [f64; 2], event: &str
 }
 
 fn broadcast_at_multiple<T: Sized + Serialize>(io: &SocketRef, pts: &[[f64; 2]], event: &str, include_self: bool, data: &T) {
-    let mut targets = match include_self {
-        true => io.to(io.id),
-        false => io.except(io.id),
-    };
+    // println!("\n start broadcasting", );
     
+    
+    let mut targets = io.within(room_name(0, -(WORLD_MAX_BOUND as f64), -(WORLD_MAX_BOUND as f64)));
+    // println!("broadcasting {} to {}", event, room_name(0, area.left, area.bottom));
+        
     for [x, y] in pts {
+        
+        // println!("at pt {:?}", [x, y]);
         
         let mut area = Rect {
             left: -(WORLD_MAX_BOUND as f64), // use WORLD_MAX_BOUND instead of WORLD_BOUND_X/Y bc tiles are square
@@ -522,9 +525,6 @@ fn broadcast_at_multiple<T: Sized + Serialize>(io: &SocketRef, pts: &[[f64; 2]],
             top: WORLD_MAX_BOUND as f64, 
             bottom: -(WORLD_MAX_BOUND as f64)
         };
-        
-        targets = io.within(room_name(0, area.left, area.bottom));
-        // println!("broadcasting {} to {}", event, room_name(0, area.left, area.bottom));
         
         for tile_layer in 1..=MAX_TILE_LAYER {
             
@@ -537,13 +537,14 @@ fn broadcast_at_multiple<T: Sized + Serialize>(io: &SocketRef, pts: &[[f64; 2]],
             if *y >= mid_y { area.bottom = mid_y; }
             else { area.top = mid_y; }
             
-            targets = targets.within(room_name(tile_layer, area.left, area.bottom));
+            targets = targets.to(room_name(tile_layer, area.left, area.bottom));
             // println!("broadcasting {} to {}", event, room_name(tile_layer, area.left, area.bottom));
         }
     }
     
-    
     targets.emit(event, data).unwrap();
+    
+    if include_self { io.emit(event, data).unwrap(); }
 }
 
 const SPLIT: &str = " : ";

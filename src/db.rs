@@ -1,18 +1,18 @@
 
-use std::{collections::HashMap, time::SystemTime};
+
+use std::time::SystemTime;
 
 use bcrypt::{hash, DEFAULT_COST};
-use futures::{TryFutureExt, TryStreamExt};
+use chrono::Utc;
+use futures::TryStreamExt;
 use mongodb::{ 
-    bson::{bson, doc, Document}, error::{Error as MongoError, ErrorKind, WriteError, WriteFailure}, options::Hint, results::{DeleteResult, UpdateResult}, Client, Cursor, Database
+    bson::{doc, Document}, error::{Error as MongoError, ErrorKind, WriteError, WriteFailure}, options::Hint, results::UpdateResult, Client, Cursor, Database
 };
-use nearsay_server::{clone_into_closure_mut, NearsayError};
-use redis::RedisResult;
-use serde::{de::DeserializeOwned, Deserialize};
-use socketioxide::extract::SocketRef;
+use nearsay_server::NearsayError;
+use serde::de::DeserializeOwned;
 use tokio_cron_scheduler::{Job, JobScheduler};
 
-use crate::{area::Rect, cache::{MapCache, UserPOI}, cluster::{cluster, get_cluster_radius_degrees, Cluster, MAX_ZOOM_LEVEL}, types::{get_blurb_from_body, Guest, Post, User, UserType, Vote, VoteKind, BLURB_LENGTH, POI}};
+use crate::{area::Rect, cache::{MapCache, UserPOI}, cluster::{cluster, get_cluster_radius_degrees, Cluster, MAX_ZOOM_LEVEL}, types::{get_blurb_from_body, Post, User, VoteKind, POI}};
 
 
 
@@ -70,8 +70,8 @@ impl NearsayDB {
         
         let db_clone = self.clone();
         sched.add(
-            // run every day at 04:00
-            Job::new_async("0 0 4 * * *", 
+            // run every day at 00:00
+            Job::new_async("0 0 0 * * *", 
                 move |_, _| {
                     let mut db_clone = db_clone.clone();
                     Box::pin(
@@ -86,21 +86,24 @@ impl NearsayDB {
         sched.start().await.unwrap();
     }
     async fn run_nightly_cleanup(&mut self) -> Result<(), mongodb::error::Error> {
+        
+        println!("running nightly cleanup at: {}", Utc::now());
+        
         let delete_old_posts_res = 
             self.mongo_db.collection::<Document>("posts")
             .delete_many(doc! { "expiry": {"$lt": today() as i32} })
             .await?;
-        println!("delete old posts result: {:?}", delete_old_posts_res);
+        println!("- delete old posts result: {:?}", delete_old_posts_res);
         
         self.cache.flush_all_posts().await.unwrap();
-        println!("cleared posts in map cache");
+        println!("- cleared posts in map cache");
         
         let mut all_posts = self.mongo_db.collection::<Post>("posts").find(doc! {}).await?;
         
         while let Some(post) = all_posts.try_next().await.unwrap() {
             self.cache.add_post_pt(&post._id, post.pos[0], post.pos[1], &get_blurb_from_body(&post.body)).await.unwrap();
         }
-        println!("added all posts back into cache");
+        println!("- added all posts back into cache");
         
         Ok(())
     }
@@ -237,17 +240,12 @@ impl NearsayDB {
             .await
         {
             Ok(_) => Ok(()),
-            Err(_) => Err(())
+            Err(e) => Err(eprintln!("err deleting user votes: {e}"))
         }
     }
 
     pub async fn delete_post(&mut self, post_id: &str) -> Result<(), ()> {
-        let post = match self.get::<Post>("posts", post_id).await? {
-            Some(post) => post,
-            None => return Ok(())
-        };
-        
-        self.cache.del_post(post_id, post.pos).await.map_err(|e| {
+        self.cache.del_post(post_id).await.map_err(|e| {
             eprintln!("when deleting post from cache: {e}")
         })?;
         

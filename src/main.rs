@@ -1,11 +1,8 @@
-use std::{collections::HashMap, env, sync::Arc};
+use std::env;
 
-use area::Rect;
-use geoutils::Location;
 use hmac::{Hmac, Mac};
 use db::NearsayDB;
 use endpoints::get_endpoints_router;
-use mongodb::bson::doc;
 use socket::on_socket_connect;
 use socketioxide::SocketIo;
 use tower_http::cors::CorsLayer;
@@ -66,8 +63,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 #[cfg(test)]
 mod tests {
-    use std::{thread, time::Duration};
-
     use rand::Rng;
 
     use crate::db::NearsayDB;

@@ -3,11 +3,10 @@ use std::time::Duration;
 use std::{error::Error, usize};
 use geoutils::Location;
 use redis::aio::MultiplexedConnection;
-use redis::{from_redis_value, AsyncCommands, Cmd, Pipeline, RedisResult, Value};
+use redis::{from_redis_value, AsyncCommands, Cmd, Pipeline, RedisResult};
 use redis::geo::{Coord, Unit};
 use rslock::LockManager;
 use serde::Serialize;
-use thousands::Separable;
 
 use crate::area::Rect;
 use crate::cluster::{get_cluster_radius_meters, merge_clusters, Cluster};
@@ -31,10 +30,6 @@ fn geoquery_radius<'a>(pipeline: &'a mut Pipeline, zoom: usize, x: f64, y: f64, 
         true => query.arg("WITHCOORD"),
         false => query,
     }
-}
-
-fn get_cluster_pos<'a>(pipeline: &'a mut Pipeline, zoom: usize, cluster_ids: &[&str]) -> &'a mut Pipeline {
-    pipeline.geo_pos(format!("Z{zoom}"), cluster_ids)
 }
 
 fn get_cluster_size<'a>(pipeline: &'a mut Pipeline, zoom: usize, cluster_id: &str) -> &'a mut Pipeline {
@@ -256,7 +251,7 @@ impl MapCache {
         Ok(())
     }
     
-    pub async fn del_post(&mut self, post_id: &str, [x, y]: [f64; 2]) -> RedisResult<()> {
+    pub async fn del_post(&mut self, post_id: &str) -> RedisResult<()> {
         
         let lock_manager = LockManager::new(vec!["redis://127.0.0.1:6000"]);
         let lock = loop {

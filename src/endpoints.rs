@@ -4,10 +4,10 @@ use hmac::Hmac;
 use serde::Serialize;
 use serde_json::{json, Value};
 use sha2::Sha256;
-use nearsay_server::{clone_into_closure, clone_into_closure_mut, NearsayError};
+use nearsay_server::{clone_into_closure, clone_into_closure_mut};
 
 
-use crate::{auth::{authenticate_with_header, create_jwt, JWTPayload}, db::{gen_id, NearsayDB}, types::{Post, User, UserType, VoteKind}};
+use crate::{auth::{authenticate_with_header, JWTPayload}, db::NearsayDB, types::{Post, User, VoteKind}};
 
 
 
