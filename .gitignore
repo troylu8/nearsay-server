@@ -1,7 +1,7 @@
-/target
-/test
-/db
-/fill-db
+target
+test
+db
+fill-db
 dump.rdb
 mongod.log
 .env

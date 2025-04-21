@@ -144,7 +144,7 @@ impl MapCache {
     }
     
     pub async fn add_post_pt(&mut self, cluster_id: &str, x: f64, y: f64, blurb: &str) -> Result<(), Box<dyn Error>> {
-        let lock_manager = LockManager::new(vec!["redis://127.0.0.1:6000"]);
+        let lock_manager = LockManager::new(vec!["redis://localhost:6000"]);
         
         let lock = loop {
             if let Ok(lock) = lock_manager
@@ -253,7 +253,7 @@ impl MapCache {
     
     pub async fn del_post(&mut self, post_id: &str) -> RedisResult<()> {
         
-        let lock_manager = LockManager::new(vec!["redis://127.0.0.1:6000"]);
+        let lock_manager = LockManager::new(vec!["redis://localhost:6000"]);
         let lock = loop {
             if let Ok(lock) = lock_manager
                 .lock("delete post".as_bytes(), Duration::from_millis(1000))
