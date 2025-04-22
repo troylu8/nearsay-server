@@ -12,7 +12,7 @@ Most client communication happens with [socket.io (socketioxide)](https://crates
 
 Uses MongoDB for persistent storage and geospatial queries.
 
-Uses Redis as a cache but [I kinda regret it.]()
+Uses Redis as a cache but [I kinda regret it.](https://rentry.co/nearsay-mishaps#premature-optimization-i-fell-for-it)
 
 <br>
 
