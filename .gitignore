@@ -4,4 +4,4 @@ db
 fill-db
 dump.rdb
 mongod.log
-.env
+*.env
