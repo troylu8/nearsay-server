@@ -1,11 +1,8 @@
-#!/usr/bin/env bash
-
-cd /home/ubuntu/nearsay/backend
+#!/bin/bash
 
 handle_exit() {
-
     echo "shutting down mongod"
-    mongod --dbpath db --shutdown
+    mongod --dbpath /nearsay_volume/db --shutdown
 
     echo "shutting down redis instances"
     redis-cli -p 6000 shutdown
@@ -17,12 +14,12 @@ handle_exit() {
 trap handle_exit EXIT
 
 echo "starting mongod"
-mongod --dbpath db --quiet --logpath mongod.log --logappend --fork
+mkdir -p /nearsay_volume/db
+mongod --dbpath /nearsay_volume/db --quiet --logpath /app/mongod.log --logappend --fork
 
 echo "starting redis instances"
 redis-server --port 6000 --daemonize yes --save "" --appendonly no
 redis-server --port 6001 --daemonize yes --save "" --appendonly no
 
 echo "starting server"
-# read -p "running"
-./nearsay-server
+/app/target/release/nearsay-server

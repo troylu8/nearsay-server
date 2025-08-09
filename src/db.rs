@@ -6,7 +6,7 @@ use bcrypt::{hash, DEFAULT_COST};
 use chrono::Utc;
 use futures::TryStreamExt;
 use mongodb::{ 
-    bson::{doc, Document}, error::{Error as MongoError, ErrorKind, WriteError, WriteFailure}, options::Hint, results::UpdateResult, Client, Cursor, Database
+    bson::{doc, Document}, error::{Error as MongoError, ErrorKind, WriteError, WriteFailure}, options::{Hint, IndexOptions}, results::UpdateResult, Client, Cursor, Database, IndexModel
 };
 use nearsay_server::NearsayError;
 use serde::de::DeserializeOwned;
@@ -33,6 +33,31 @@ impl NearsayDB {
             cache: MapCache::new().await.unwrap(), 
             mongo_db: Client::with_uri_str("mongodb://localhost:27017").await.unwrap().database("nearsay")
         };
+        
+        
+        // create db indexes ---
+        
+        nearsay_db.mongo_db.collection::<User>("users").create_index(
+        IndexModel::builder()
+            .keys(doc! {"username": 1 })
+            .options(IndexOptions::builder().unique(true).build())
+            .build()
+        ).await.unwrap();
+        
+        nearsay_db.mongo_db.collection::<Document>("votes").create_index(
+            IndexModel::builder()
+            .keys(doc! { "uid": 1, "postId": 1 })
+            .options(IndexOptions::builder()
+                .name("postId-and-uid".to_string())
+                .unique(true)
+                .build()
+            )
+            .build()
+        ).await.unwrap();
+        
+        nearsay_db.mongo_db.collection::<Post>("posts").create_index(
+            IndexModel::builder().keys(doc! {"pos": "2dsphere" }).build()
+        ).await.unwrap();
         
         nearsay_db.clone().start_nightly_cleanup_job().await;
 
@@ -236,7 +261,6 @@ impl NearsayDB {
         match 
             self.mongo_db.collection::<Document>("votes")
             .delete_many(doc! { "uid": uid })
-            .hint(Hint::Name("uid_1".to_string()))
             .await
         {
             Ok(_) => Ok(()),
@@ -255,7 +279,6 @@ impl NearsayDB {
         match 
             self.mongo_db.collection::<Document>("votes")
             .delete_many(doc! { "postId": post_id })
-            .hint(Hint::Name("postId_1".to_string()))
             .await
         {
             Ok(_) => Ok(()),
@@ -296,7 +319,7 @@ impl NearsayDB {
         match 
             self.mongo_db.collection::<Document>("votes")
             .find_one( doc!{ "postId": post_id, "uid": uid } )
-            .hint(Hint::Name("postId_1_uid_1".to_string()))
+            .hint(Hint::Name("postId-and-uid".to_string()))
             .await
         {
             Err(mongo_err) => {

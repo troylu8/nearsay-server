@@ -1,0 +1,11 @@
+services:
+  main:
+    build: .
+    ports: 
+      - "21114:21114"
+    volumes:
+      - "nearsay_volume:/nearsay_volume"
+    restart: always
+
+volumes:
+  nearsay_volume:

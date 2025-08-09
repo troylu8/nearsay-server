@@ -7,8 +7,6 @@ use socket::on_socket_connect;
 use socketioxide::SocketIo;
 use tower_http::cors::CorsLayer;
 use nearsay_server::clone_into_closure;
-use axum_server::tls_rustls::RustlsConfig;
-use std::net::SocketAddr;
 
 mod area;
 mod types;
@@ -37,33 +35,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .layer(socketio_layer)
         .layer(CorsLayer::permissive());
     
-    let addr = SocketAddr::from(([0, 0, 0, 0], 5000));
-    let config = RustlsConfig::from_pem_file(
-        "/etc/letsencrypt/live/nearsay.troylu.com/fullchain.pem",
-        "/etc/letsencrypt/live/nearsay.troylu.com/privkey.pem"
-    ).await?;
-    
-    axum_server::bind_rustls(addr, config)
-        .serve(app.into_make_service())
-        .await?;
+    let listener = tokio::net::TcpListener::bind("0.0.0.0:21114").await.unwrap();
+    axum::serve(listener, app).await?;
     
     Ok(())
 }
-// #[tokio::main]
-// async fn main() -> Result<(), ()> {
-
-//     let mut nearsay_db = NearsayDB::new().await;
-    
-//     _ = nearsay_db.insert_post(None, &[20.0, 20.0], "post body").await?;
-//     _ = nearsay_db.insert_post(None, &[20.0, 20.0], "post body").await?;
-    
-//     let (post_id, _) = nearsay_db.insert_post(None, &[20.0, 20.0], "post body").await.unwrap();
-    
-//     _ = nearsay_db.delete_post(&post_id).await;
-    
-//     Ok(())
-// }
-
 
 #[cfg(test)]
 mod tests {
