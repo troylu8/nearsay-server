@@ -15,6 +15,7 @@ trap handle_exit EXIT
 
 echo "starting mongod"
 mkdir -p /nearsay_volume/db
+touch /app/mongod.log
 mongod --dbpath /nearsay_volume/db --quiet --logpath /app/mongod.log --logappend --fork
 
 echo "starting redis instances"
